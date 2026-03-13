@@ -1175,19 +1175,19 @@ def process_submit_campaign_tiktokshop(
     }
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
-        ws = wb.active
+        src_wb = load_workbook(io.BytesIO(mf.getvalue()))
+        src_ws = src_wb.active
 
         header_row = 2
         data_start = 3
 
-        sku_col = get_header_col_fuzzy(ws, header_row, [
+        sku_col = get_header_col_fuzzy(src_ws, header_row, [
             "SKU Name",
             "Nama SKU",
             "Seller SKU",
             "SKU Penjual",
         ])
-        price_col = get_header_col_fuzzy(ws, header_row, [
+        price_col = get_header_col_fuzzy(src_ws, header_row, [
             "Campaign price",
             "Campaign Price",
             "Harga Campaign",
@@ -1201,15 +1201,15 @@ def process_submit_campaign_tiktokshop(
             })
             continue
 
-        changed_rows: List[int] = []
+        changed_rows_data: List[List[Any]] = []
 
-        for r in range(data_start, ws.max_row + 1):
-            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+        for r in range(data_start, src_ws.max_row + 1):
+            sku_full = s_clean(src_ws.cell(row=r, column=sku_col).value)
             if not sku_full:
                 continue
 
             summary["rows_scanned"] += 1
-            old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
+            old_price = parse_price_cell(src_ws.cell(row=r, column=price_col).value)
             new_price, reason = compute_price_from_maps(
                 sku_full, price_map, addon_map, price_key, discount_rp
             )
@@ -1229,22 +1229,31 @@ def process_submit_campaign_tiktokshop(
             if old_price is not None and int(old_price) == int(new_price):
                 continue
 
-            safe_set_cell_value(ws, r, price_col, int(new_price))
-            changed_rows.append(r)
+            row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
+            if price_col - 1 < len(row_vals):
+                row_vals[price_col - 1] = int(new_price)
+            changed_rows_data.append(row_vals)
             summary["rows_written"] += 1
 
-        if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+        out_wb = Workbook()
+        out_ws = out_wb.active
+        out_ws.title = src_ws.title
+
+        for c in range(1, src_ws.max_column + 1):
+            out_ws.cell(row=1, column=c, value=src_ws.cell(row=1, column=c).value)
+            out_ws.cell(row=2, column=c, value=src_ws.cell(row=2, column=c).value)
+
+        if changed_rows_data:
+            for out_r, row_vals in enumerate(changed_rows_data, start=data_start):
+                for c, val in enumerate(row_vals, start=1):
+                    out_ws.cell(row=out_r, column=c, value=val)
         else:
             issues.append({
                 "file": mf.name,
                 "reason": "Tidak ada baris berubah pada file ini.",
             })
 
-        output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
+        output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(out_wb)))
 
     summary["issues_count"] = len(issues)
 
