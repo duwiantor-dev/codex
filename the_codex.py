@@ -739,6 +739,53 @@ def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[st
     return result
 
 
+def load_pricelist_price_map_multisheet(
+    pl_bytes: bytes,
+    needed_cols: List[str],
+    start_sheet: str = "LAPTOP",
+    end_sheet: str = "TELCO",
+) -> Dict[str, Dict[str, int]]:
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
+
+    for sname in wb.sheetnames:
+        if su(sname) == "LAPTOP":
+            delete_coming_block_in_laptop(wb[sname])
+            break
+
+    target_sheets = sheet_range_between(wb.sheetnames, start_sheet, end_sheet)
+    result: Dict[str, Dict[str, int]] = {}
+    parsed_sheets = 0
+
+    for sname in target_sheets:
+        ws = wb[sname]
+        try:
+            header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
+        except Exception:
+            continue
+
+        parsed_sheets += 1
+        for r in range(header_row + 1, ws.max_row + 1):
+            sku = norm_sku(ws.cell(row=r, column=sku_col).value)
+            if not sku:
+                continue
+            if sku not in result:
+                result[sku] = {}
+            for label, col in price_cols.items():
+                raw = parse_price_cell(ws.cell(row=r, column=col).value)
+                if raw is not None:
+                    result[sku][label] = int(apply_multiplier_if_needed(raw))
+
+    if parsed_sheets == 0:
+        raise ValueError(
+            f"Tidak ada sheet pricelist yang valid pada range '{start_sheet}' s/d '{end_sheet}' untuk kolom {needed_cols}."
+        )
+    if not result:
+        raise ValueError(
+            f"Pricelist multi-sheet '{start_sheet}' s/d '{end_sheet}' terbaca, tapi data harga kosong."
+        )
+    return result
+
+
 def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]], addon_map: Dict[str, int], price_key: str, discount_rp: int) -> Tuple[Optional[int], str]:
     base_sku, addons = split_sku_addons(sku_full)
     base_sku = norm_sku(base_sku)
@@ -1109,7 +1156,12 @@ def process_submit_campaign_tiktokshop(
     discount_rp: int,
     price_key: str,
 ):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(
+        pricelist_file.getvalue(),
+        ["M3", "M4"],
+        start_sheet="LAPTOP",
+        end_sheet="TELCO",
+    )
     addon_map = load_addon_map_generic(addon_file.getvalue())
 
     issues: List[Dict[str, Any]] = []
