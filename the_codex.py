@@ -1201,7 +1201,7 @@ def process_submit_campaign_tiktokshop(
             })
             continue
 
-        changed_rows_data: List[List[Any]] = []
+        matched_rows_data: List[List[Any]] = []
 
         for r in range(data_start, src_ws.max_row + 1):
             sku_full = s_clean(src_ws.cell(row=r, column=sku_col).value)
@@ -1226,13 +1226,10 @@ def process_submit_campaign_tiktokshop(
                 })
                 continue
 
-            if old_price is not None and int(old_price) == int(new_price):
-                continue
-
             row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
             if price_col - 1 < len(row_vals):
                 row_vals[price_col - 1] = int(new_price)
-            changed_rows_data.append(row_vals)
+            matched_rows_data.append(row_vals)
             summary["rows_written"] += 1
 
         out_wb = Workbook()
@@ -1243,14 +1240,14 @@ def process_submit_campaign_tiktokshop(
             out_ws.cell(row=1, column=c, value=src_ws.cell(row=1, column=c).value)
             out_ws.cell(row=2, column=c, value=src_ws.cell(row=2, column=c).value)
 
-        if changed_rows_data:
-            for out_r, row_vals in enumerate(changed_rows_data, start=data_start):
+        if matched_rows_data:
+            for out_r, row_vals in enumerate(matched_rows_data, start=data_start):
                 for c, val in enumerate(row_vals, start=1):
                     out_ws.cell(row=out_r, column=c, value=val)
         else:
             issues.append({
                 "file": mf.name,
-                "reason": "Tidak ada baris berubah pada file ini.",
+                "reason": "Tidak ada SKU yang match pada pricelist untuk file ini.",
             })
 
         output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(out_wb)))
@@ -1667,7 +1664,7 @@ def render_submit_campaign_shopee():
 def render_submit_campaign_tiktokshop():
     page_header(
         "Submit Campaign TikTokShop",
-        "Memproses file submit campaign TikTokShop. Output hanya mengambil row yang berubah.",
+        "Memproses file submit campaign TikTokShop. Output mengambil semua SKU yang ada di pricelist.",
         [
             "Template Campaign Tiktokshop (.xlsx)",
             "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
