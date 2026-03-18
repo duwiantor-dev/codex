@@ -722,8 +722,6 @@ def require_authentication() -> Optional[Dict[str, Any]]:
     if user:
         return user
     return render_login_page()
-init_auth_db()
-migrate_legacy_auth_json_if_needed()
 
 
 # ============================================================
@@ -1113,6 +1111,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
     return sku_map, sorted(areas)
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
     for sname in wb.sheetnames:
@@ -1127,8 +1126,11 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
         merged_lookup.update(sku_map)
         areas_all |= set(areas)
     if not merged_lookup:
+        wb.close()
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
-    return merged_lookup, sorted(areas_all)
+    out = (merged_lookup, sorted(areas_all))
+    wb.close()
+    return out
 
 
 def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]) -> Optional[int]:
@@ -1358,6 +1360,7 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: s
 # ============================================================
 # PRICE LOADERS
 # ============================================================
+@st.cache_data(show_spinner=False, ttl=600)
 def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
     wb = load_workbook(io.BytesIO(addon_bytes), data_only=True, read_only=True)
     ws = wb.active
@@ -1385,6 +1388,7 @@ def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
         if price_raw is None:
             continue
         addon_map[code] = int(apply_multiplier_if_needed(price_raw))
+    wb.close()
     return addon_map
 
 
@@ -1413,6 +1417,7 @@ def find_header_row_and_cols_pricelist_fixed(ws: Worksheet, required_price_cols:
     )
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[str, Dict[str, int]]:
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=True)
     ws = get_change_sheet(wb)
@@ -1427,9 +1432,11 @@ def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[st
             raw = parse_price_cell(ws.cell(row=r, column=col).value)
             if raw is not None:
                 result[sku][label] = int(apply_multiplier_if_needed(raw))
+    wb.close()
     return result
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map_multisheet(
     pl_bytes: bytes,
     needed_cols: List[str],
@@ -1504,14 +1511,17 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # PRICE PROCESSORS
 # ============================================================
 def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
 
         if mode == "normal":
@@ -1567,14 +1577,12 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start_fixed - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, data_start_fixed, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
 
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1582,20 +1590,25 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
 def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update TikTokShop tidak sesuai."})
+            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1617,13 +1630,11 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, 6, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_harga_normal_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1631,20 +1642,25 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
     return zip_named_files(output_files), "hasil_harga_normal_tiktokshop.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
 def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update PowerMerchant tidak sesuai."})
+            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1666,18 +1682,17 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, 6, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
         return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
+
 
 
 def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
