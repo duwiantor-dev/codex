@@ -1268,6 +1268,21 @@ def safe_set_cell_value(ws: Worksheet, row: int, col: int, value):
     cell.value = value
 
 
+def batch_delete_unkept_rows(ws: Worksheet, data_start_row: int, keep_rows: Set[int]):
+    """Delete all data rows from data_start_row onward except those in keep_rows.
+
+    Rows are deleted from bottom to top so worksheet indexes remain stable.
+    If keep_rows is empty, all data rows from data_start_row onward are deleted.
+    """
+    if data_start_row < 1 or ws.max_row < data_start_row:
+        return
+
+    keep = {int(r) for r in keep_rows if isinstance(r, int) and r >= data_start_row}
+    rows_to_delete = [r for r in range(data_start_row, ws.max_row + 1) if r not in keep]
+    for r in reversed(rows_to_delete):
+        ws.delete_rows(r, 1)
+
+
 def workbook_to_bytes(wb) -> bytes:
     out = io.BytesIO()
     wb.save(out)
@@ -2974,7 +2989,7 @@ def build_menu(user: Dict[str, Any]) -> str:
 
     main_menu_options = ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"]
     if user.get("role") == "admin":
-        main_menu_options.append("Kelola User")
+        main_menu_options.extend(["Kelola User", "System Diagnostics"])
 
     group = st.sidebar.radio(
         "Menu Utama",
