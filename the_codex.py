@@ -285,8 +285,6 @@ def get_current_user() -> Optional[Dict[str, Any]]:
 
 def render_login_page() -> Optional[Dict[str, Any]]:
     st.title(f"{APP_TITLE} - Login")
-    
-    )
 
     with st.form("login_form"):
         username = st.text_input("Username", key="login_username")
