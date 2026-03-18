@@ -1,6 +1,13 @@
+import base64
+import hashlib
+import hmac
 import io
+import json
+import os
 import re
+import secrets
 import zipfile
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -18,6 +25,13 @@ MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
 
+AUTH_FILE = "users_local.json"
+JWT_SECRET = os.environ.get("APP_JWT_SECRET", "ganti-secret-ini-di-production")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = 8
+DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin")
+DEFAULT_ADMIN_PASSWORD = os.environ.get("APP_DEFAULT_PASSWORD", "admin123")
+
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
 
@@ -29,11 +43,205 @@ SESSION_DEFAULTS = {
     "summary_cache": {},
     "stock_shopee_areas_loaded": [],
     "stock_tiktokshop_areas_loaded": [],
+    "auth_token": "",
+    "auth_user": None,
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
+
+
+
+# ============================================================
+# AUTH HELPERS (LOCAL JSON + JWT)
+# ============================================================
+def get_auth_file_path() -> str:
+    return os.path.join(os.path.dirname(__file__), AUTH_FILE)
+
+
+def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
+    salt = salt or secrets.token_hex(16)
+    digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    return salt, digest
+
+
+def verify_password(password: str, salt: str, password_hash: str) -> bool:
+    _, digest = hash_password(password, salt)
+    return hmac.compare_digest(digest, password_hash)
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("utf-8")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("utf-8"))
+
+
+def create_jwt(payload: Dict[str, Any]) -> str:
+    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
+    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
+    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    return f"{header_b64}.{payload_b64}.{_b64url_encode(signature)}"
+
+
+def decode_jwt(token: str) -> Dict[str, Any]:
+    try:
+        header_b64, payload_b64, signature_b64 = token.split(".")
+    except ValueError as exc:
+        raise ValueError("Format token tidak valid") from exc
+
+    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
+    expected_signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
+    actual_signature = _b64url_decode(signature_b64)
+
+    if not hmac.compare_digest(expected_signature, actual_signature):
+        raise ValueError("Signature token tidak valid")
+
+    payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    exp = payload.get("exp")
+    if exp is None:
+        raise ValueError("Token tidak memiliki expiry")
+    if datetime.now(timezone.utc).timestamp() > float(exp):
+        raise ValueError("Token sudah expired")
+    return payload
+
+
+def load_users() -> Dict[str, Dict[str, Any]]:
+    path = get_auth_file_path()
+    if not os.path.exists(path):
+        salt, password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        default_users = {
+            DEFAULT_ADMIN_USERNAME: {
+                "salt": salt,
+                "password_hash": password_hash,
+                "role": "admin",
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(default_users, f, indent=2)
+        return default_users
+
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data if isinstance(data, dict) else {}
+
+
+def save_users(users: Dict[str, Dict[str, Any]]):
+    with open(get_auth_file_path(), "w", encoding="utf-8") as f:
+        json.dump(users, f, indent=2)
+
+
+def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
+    username = s_clean(username)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,30}", username):
+        return False, "Username harus 3-30 karakter dan hanya boleh huruf, angka, titik, underscore, atau minus."
+    if len(password) < 6:
+        return False, "Password minimal 6 karakter."
+
+    users = load_users()
+    if username in users:
+        return False, "Username sudah terdaftar."
+
+    salt, password_hash = hash_password(password)
+    users[username] = {
+        "salt": salt,
+        "password_hash": password_hash,
+        "role": role,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    save_users(users)
+    return True, "Registrasi berhasil. Silakan login."
+
+
+def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    users = load_users()
+    user = users.get(s_clean(username))
+    if not user:
+        return False, "Username tidak ditemukan.", None
+    if not verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
+        return False, "Password salah.", None
+    return True, "Login berhasil.", {"username": s_clean(username), "role": user.get("role", "user")}
+
+
+def issue_token(user: Dict[str, Any]) -> str:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": user["username"],
+        "role": user.get("role", "user"),
+        "iat": now.timestamp(),
+        "exp": (now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp(),
+    }
+    return create_jwt(payload)
+
+
+def logout():
+    st.session_state.auth_token = ""
+    st.session_state.auth_user = None
+
+
+def get_current_user() -> Optional[Dict[str, Any]]:
+    token = st.session_state.get("auth_token", "")
+    if not token:
+        return None
+    try:
+        payload = decode_jwt(token)
+        return {"username": payload.get("sub", ""), "role": payload.get("role", "user")}
+    except Exception:
+        logout()
+        return None
+
+
+def render_login_page() -> Optional[Dict[str, Any]]:
+    st.title(f"{APP_TITLE} - Login")
+    st.caption("Authentication lokal menggunakan JWT tanpa database. User disimpan di file JSON lokal.")
+    st.info(f"User default pertama kali: {DEFAULT_ADMIN_USERNAME} / {DEFAULT_ADMIN_PASSWORD}. Segera ganti di production.")
+
+    tab_login, tab_register = st.tabs(["Login", "Register"])
+
+    with tab_login:
+        with st.form("login_form"):
+            username = st.text_input("Username", key="login_username")
+            password = st.text_input("Password", type="password", key="login_password")
+            submitted = st.form_submit_button("Login")
+            if submitted:
+                ok, message, user = authenticate_user(username, password)
+                if ok and user is not None:
+                    st.session_state.auth_token = issue_token(user)
+                    st.session_state.auth_user = user
+                    st.success(message)
+                    st.rerun()
+                else:
+                    st.error(message)
+
+    with tab_register:
+        with st.form("register_form"):
+            new_username = st.text_input("Username baru", key="register_username")
+            new_password = st.text_input("Password baru", type="password", key="register_password")
+            confirm_password = st.text_input("Konfirmasi password", type="password", key="register_password_confirm")
+            submitted = st.form_submit_button("Register")
+            if submitted:
+                if new_password != confirm_password:
+                    st.error("Konfirmasi password tidak sama.")
+                else:
+                    ok, message = register_user(new_username, new_password)
+                    if ok:
+                        st.success(message)
+                    else:
+                        st.error(message)
+    return None
+
+
+def require_authentication() -> Optional[Dict[str, Any]]:
+    user = get_current_user()
+    if user:
+        return user
+    return render_login_page()
 
 # ============================================================
 # GENERIC HELPERS
@@ -1743,8 +1951,13 @@ def render_submit_campaign_tiktokshop():
 # ============================================================
 # SIDEBAR ROUTER
 # ============================================================
-def build_menu() -> str:
+def build_menu(user: Dict[str, Any]) -> str:
     st.sidebar.title(APP_TITLE)
+    st.sidebar.success(f"Login sebagai: {user['username']} ({user.get('role', 'user')})")
+    if st.sidebar.button("Logout", use_container_width=True):
+        logout()
+        st.rerun()
+
 
     group = st.sidebar.radio(
         "Menu Utama",
@@ -1817,7 +2030,11 @@ def build_menu() -> str:
 
 
 def main():
-    route = build_menu()
+    user = require_authentication()
+    if not user:
+        return
+
+    route = build_menu(user)
     if route == "dashboard":
         render_dashboard()
     elif route == "update_stok_shopee":
