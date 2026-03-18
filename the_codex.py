@@ -285,10 +285,6 @@ def get_current_user() -> Optional[Dict[str, Any]]:
 
 def render_login_page() -> Optional[Dict[str, Any]]:
     st.title(f"{APP_TITLE} - Login")
-    st.caption("Authentication lokal menggunakan JWT tanpa database. User disimpan di file JSON lokal.")
-    st.info(
-        f"User default pertama kali: {DEFAULT_ADMIN_USERNAME} / {DEFAULT_ADMIN_PASSWORD}. "
-        "Fitur register umum dimatikan. Penambahan user hanya bisa dilakukan oleh admin."
     )
 
     with st.form("login_form"):
