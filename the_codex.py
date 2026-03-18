@@ -242,6 +242,8 @@ def bootstrap_admin_if_needed():
         append_audit_log("bootstrap_admin", target=DEFAULT_ADMIN_USERNAME)
 
 
+init_auth_db()
+migrate_legacy_auth_json_if_needed()
 bootstrap_admin_if_needed()
 
 
