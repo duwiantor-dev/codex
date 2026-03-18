@@ -75,10 +75,6 @@ for _k, _v in SESSION_DEFAULTS.items():
 
 
 
-init_auth_db()
-migrate_legacy_auth_json_if_needed()
-
-
 # ============================================================
 # AUTH HELPERS (SQLITE + JWT)
 # ============================================================
@@ -724,6 +720,9 @@ def require_authentication() -> Optional[Dict[str, Any]]:
     if user:
         return user
     return render_login_page()
+init_auth_db()
+migrate_legacy_auth_json_if_needed()
+
 
 # ============================================================
 # GENERIC HELPERS
