@@ -327,7 +327,7 @@ def validate_username(username: str) -> Tuple[bool, str, str]:
 
 def validate_password(password: str, username: str = "") -> Tuple[bool, str]:
     password = password or ""
-    if len(password) < 12:
+    if len(password) < 3:
         return False, "Password minimal 12 karakter."
     if username and username.lower() in password.lower():
         return False, "Password tidak boleh mengandung username."
@@ -633,7 +633,6 @@ def render_user_management(current_user: Dict[str, Any]):
 
     st.subheader("Daftar User")
     st.dataframe(pd.DataFrame(user_rows), use_container_width=True, hide_index=True)
-    st.info("Password policy baru: minimal 12 karakter, wajib huruf besar, huruf kecil, angka, dan simbol.")
 
     tab_add, tab_bulk, tab_reset, tab_delete = st.tabs([
         "Tambah User",
