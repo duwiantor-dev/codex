@@ -716,13 +716,7 @@ def render_user_management(current_user: Dict[str, Any]):
 
 
 def require_authentication() -> Optional[Dict[str, Any]]:
-    if not JWT_SECRET:
-        st.error("APP_JWT_SECRET belum di-set. Set environment variable ini sebelum app dipakai publik.")
-        st.stop()
-    user = get_current_user()
-    if user:
-        return user
-    return render_login_page()
+    return {"username": "local-user", "role": "admin"}
 
 
 # ============================================================
@@ -2593,18 +2587,12 @@ def render_submit_campaign_tiktokshop():
 # ============================================================
 def build_menu(user: Dict[str, Any]) -> str:
     st.sidebar.title(APP_TITLE)
-    st.sidebar.success(f"Login sebagai: {user['username']} ({user.get('role', 'user')})")
+    st.sidebar.info("Mode cepat: login dimatikan")
     active_job_label = st.session_state.get("active_job_label", "")
     if active_job_label:
         st.sidebar.info(f"Proses aktif terakhir: {active_job_label}")
-    if st.sidebar.button("Logout", use_container_width=True):
-        logout()
-        st.rerun()
-
 
     main_menu_options = ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"]
-    if user.get("role") == "admin":
-        main_menu_options.append("Kelola User")
 
     group = st.sidebar.radio(
         "Menu Utama",
@@ -2662,8 +2650,6 @@ def build_menu(user: Dict[str, Any]) -> str:
         else:
             route = "submit_campaign_tiktokshop"
 
-    elif group == "Kelola User" and user.get("role") == "admin":
-        route = "user_management"
 
     else:
         route = "dashboard"
@@ -2709,8 +2695,6 @@ def main():
         render_submit_campaign_shopee()
     elif route == "submit_campaign_tiktokshop":
         render_submit_campaign_tiktokshop()
-    elif route == "user_management":
-        render_user_management(user)
     else:
         st.error("Menu tidak dikenal.")
 
