@@ -1,17 +1,6 @@
-import base64
-import hashlib
-import hmac
 import io
-import json
-import os
 import re
-import secrets
-import sqlite3
 import zipfile
-import gc
-import time
-from pathlib import Path
-from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
@@ -25,33 +14,9 @@ from openpyxl.worksheet.worksheet import Worksheet
 # APP CONFIG
 # ============================================================
 APP_TITLE = "The Codex"
-MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "30"))
-MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "40"))
-MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "20"))
-MAX_XLSX_ENTRIES = int(os.environ.get("APP_MAX_XLSX_ENTRIES", "20000"))
-MAX_XLSX_UNCOMPRESSED_MB = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "120"))
+MAX_MASS_FILES = 50
+MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
-
-MAX_SHOPEE_FILES = int(os.environ.get("APP_MAX_SHOPEE_FILES", "5"))
-MAX_TIKTOK_FILES = int(os.environ.get("APP_MAX_TIKTOK_FILES", "3"))
-MAX_BIGSELLER_FILES = int(os.environ.get("APP_MAX_BIGSELLER_FILES", "30"))
-MAX_SHOPEE_FILE_MB = int(os.environ.get("APP_MAX_SHOPEE_FILE_MB", "3"))
-MAX_TIKTOK_FILE_MB = int(os.environ.get("APP_MAX_TIKTOK_FILE_MB", "8"))
-MAX_BIGSELLER_FILE_MB = int(os.environ.get("APP_MAX_BIGSELLER_FILE_MB", "3"))
-MAX_PRICELIST_FILE_MB = int(os.environ.get("APP_MAX_PRICELIST_FILE_MB", "20"))
-MAX_ADDON_FILE_MB = int(os.environ.get("APP_MAX_ADDON_FILE_MB", "1"))
-MAX_GENERIC_INPUT_FILE_MB = int(os.environ.get("APP_MAX_GENERIC_INPUT_FILE_MB", "8"))
-
-AUTH_DB = "codexid_auth.sqlite3"
-LEGACY_AUTH_FILE = "users_local.json"
-JWT_SECRET = os.environ.get("APP_JWT_SECRET", "").strip()
-JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = int(os.environ.get("APP_JWT_EXPIRE_HOURS", "8"))
-DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
-DEFAULT_ADMIN_PASSWORD = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "").strip() or os.environ.get("APP_DEFAULT_PASSWORD", "admin123").strip()
-FAILED_LOGIN_WINDOW_MINUTES = int(os.environ.get("APP_FAILED_LOGIN_WINDOW_MINUTES", "15"))
-FAILED_LOGIN_MAX_ATTEMPTS = int(os.environ.get("APP_FAILED_LOGIN_MAX_ATTEMPTS", "5"))
-LOGIN_LOCKOUT_MINUTES = int(os.environ.get("APP_LOGIN_LOCKOUT_MINUTES", "15"))
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -64,659 +29,10 @@ SESSION_DEFAULTS = {
     "summary_cache": {},
     "stock_shopee_areas_loaded": [],
     "stock_tiktokshop_areas_loaded": [],
-    "auth_token": "",
-    "auth_user": None,
-    "active_job_key": "",
-    "active_job_label": "",
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
-
-
-
-
-# ============================================================
-# AUTH HELPERS (SQLITE + JWT)
-# ============================================================
-def get_auth_db_path() -> str:
-    return os.path.join(os.path.dirname(__file__), AUTH_DB)
-
-
-def get_legacy_auth_file_path() -> str:
-    return os.path.join(os.path.dirname(__file__), LEGACY_AUTH_FILE)
-
-
-def get_db_connection() -> sqlite3.Connection:
-    conn = sqlite3.connect(get_auth_db_path(), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA synchronous=NORMAL")
-    return conn
-
-
-def init_auth_db():
-    with get_db_connection() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                username TEXT PRIMARY KEY,
-                salt TEXT NOT NULL,
-                password_hash TEXT NOT NULL,
-                role TEXT NOT NULL DEFAULT 'user',
-                created_at TEXT NOT NULL,
-                password_reset_at TEXT,
-                token_version INTEGER NOT NULL DEFAULT 1
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS login_attempts (
-                username TEXT PRIMARY KEY,
-                failed_count INTEGER NOT NULL DEFAULT 0,
-                last_failed_at TEXT,
-                locked_until TEXT
-            )
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS audit_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                ts TEXT NOT NULL,
-                event TEXT NOT NULL,
-                actor TEXT NOT NULL,
-                target TEXT,
-                status TEXT NOT NULL,
-                details_json TEXT
-            )
-        """)
-        conn.commit()
-
-
-def append_audit_log(event: str, actor: str = "system", target: str = "", status: str = "ok", details: Optional[Dict[str, Any]] = None):
-    try:
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT INTO audit_logs(ts, event, actor, target, status, details_json) VALUES (?, ?, ?, ?, ?, ?)",
-                (datetime.now(timezone.utc).isoformat(), event, actor, target, status, json.dumps(details or {}, ensure_ascii=False)),
-            )
-            conn.commit()
-    except Exception:
-        pass
-
-
-def migrate_legacy_auth_json_if_needed():
-    legacy_path = Path(get_legacy_auth_file_path())
-    if not legacy_path.exists():
-        return
-    with get_db_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        if count > 0:
-            return
-        try:
-            legacy_data = json.loads(legacy_path.read_text(encoding="utf-8"))
-        except Exception:
-            append_audit_log("legacy_auth_migration_failed", status="error")
-            return
-        if not isinstance(legacy_data, dict):
-            return
-        for username, info in legacy_data.items():
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO users
-                (username, salt, password_hash, role, created_at, password_reset_at, token_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    username,
-                    info.get("salt", ""),
-                    info.get("password_hash", ""),
-                    info.get("role", "user"),
-                    info.get("created_at") or datetime.now(timezone.utc).isoformat(),
-                    info.get("password_reset_at"),
-                    int(info.get("token_version", 1)),
-                ),
-            )
-        conn.commit()
-        append_audit_log("legacy_auth_migrated", details={"users": len(legacy_data)})
-
-
-def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
-    salt = salt or secrets.token_hex(16)
-    digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
-    return salt, digest
-
-
-def verify_password(password: str, salt: str, password_hash: str) -> bool:
-    _, digest = hash_password(password, salt)
-    return hmac.compare_digest(digest, password_hash)
-
-
-def _b64url_encode(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("utf-8")
-
-
-def _b64url_decode(value: str) -> bytes:
-    padding = "=" * (-len(value) % 4)
-    return base64.urlsafe_b64decode((value + padding).encode("utf-8"))
-
-
-def create_jwt(payload: Dict[str, Any]) -> str:
-    header = {"alg": JWT_ALGORITHM, "typ": "JWT"}
-    header_b64 = _b64url_encode(json.dumps(header, separators=(",", ":")).encode("utf-8"))
-    payload_b64 = _b64url_encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    return f"{header_b64}.{payload_b64}.{_b64url_encode(signature)}"
-
-
-def decode_jwt(token: str) -> Dict[str, Any]:
-    try:
-        header_b64, payload_b64, signature_b64 = token.split(".")
-    except ValueError as exc:
-        raise ValueError("Format token tidak valid") from exc
-
-    signing_input = f"{header_b64}.{payload_b64}".encode("utf-8")
-    expected_signature = hmac.new(JWT_SECRET.encode("utf-8"), signing_input, hashlib.sha256).digest()
-    actual_signature = _b64url_decode(signature_b64)
-
-    if not hmac.compare_digest(expected_signature, actual_signature):
-        raise ValueError("Signature token tidak valid")
-
-    payload = json.loads(_b64url_decode(payload_b64).decode("utf-8"))
-    exp = payload.get("exp")
-    if exp is None:
-        raise ValueError("Token tidak memiliki expiry")
-    if datetime.now(timezone.utc).timestamp() > float(exp):
-        raise ValueError("Token sudah expired")
-    return payload
-
-
-def bootstrap_admin_if_needed():
-    with get_db_connection() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
-        if count > 0:
-            return
-        salt, password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
-        conn.execute(
-            "INSERT INTO users(username, salt, password_hash, role, created_at, token_version) VALUES (?, ?, ?, 'admin', ?, 1)",
-            (DEFAULT_ADMIN_USERNAME, salt, password_hash, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-        append_audit_log("bootstrap_admin", target=DEFAULT_ADMIN_USERNAME)
-
-
-init_auth_db()
-migrate_legacy_auth_json_if_needed()
-bootstrap_admin_if_needed()
-
-
-def load_users() -> Dict[str, Dict[str, Any]]:
-    with get_db_connection() as conn:
-        rows = conn.execute(
-            "SELECT username, salt, password_hash, role, created_at, password_reset_at, token_version FROM users ORDER BY username"
-        ).fetchall()
-    return {
-        row["username"]: {
-            "salt": row["salt"],
-            "password_hash": row["password_hash"],
-            "role": row["role"],
-            "created_at": row["created_at"],
-            "password_reset_at": row["password_reset_at"] or "",
-            "token_version": int(row["token_version"]),
-        }
-        for row in rows
-    }
-
-
-def get_user_record(username: str) -> Optional[Dict[str, Any]]:
-    username = s_clean(username)
-    with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT username, salt, password_hash, role, created_at, password_reset_at, token_version FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def save_users(users: Dict[str, Dict[str, Any]]):
-    with get_db_connection() as conn:
-        conn.execute("DELETE FROM users")
-        for username, info in users.items():
-            conn.execute(
-                """
-                INSERT INTO users(username, salt, password_hash, role, created_at, password_reset_at, token_version)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    username,
-                    info.get("salt", ""),
-                    info.get("password_hash", ""),
-                    info.get("role", "user"),
-                    info.get("created_at") or datetime.now(timezone.utc).isoformat(),
-                    info.get("password_reset_at"),
-                    int(info.get("token_version", 1)),
-                ),
-            )
-        conn.commit()
-
-
-def get_login_attempt(username: str) -> Dict[str, Any]:
-    username = s_clean(username)
-    with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT failed_count, last_failed_at, locked_until FROM login_attempts WHERE username = ?",
-            (username,),
-        ).fetchone()
-    if not row:
-        return {"failed_count": 0, "last_failed_at": None, "locked_until": None}
-    return dict(row)
-
-
-def record_failed_login(username: str):
-    username = s_clean(username)
-    now = datetime.now(timezone.utc)
-    with get_db_connection() as conn:
-        row = conn.execute(
-            "SELECT failed_count, last_failed_at FROM login_attempts WHERE username = ?",
-            (username,),
-        ).fetchone()
-        failed_count = 1
-        if row and row["last_failed_at"]:
-            try:
-                last_failed = datetime.fromisoformat(row["last_failed_at"])
-            except Exception:
-                last_failed = now
-            if (now - last_failed).total_seconds() / 60.0 <= FAILED_LOGIN_WINDOW_MINUTES:
-                failed_count = int(row["failed_count"] or 0) + 1
-        locked_until = None
-        if failed_count >= FAILED_LOGIN_MAX_ATTEMPTS:
-            locked_until = (now + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)).isoformat()
-        conn.execute(
-            """
-            INSERT INTO login_attempts(username, failed_count, last_failed_at, locked_until)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(username) DO UPDATE SET
-                failed_count=excluded.failed_count,
-                last_failed_at=excluded.last_failed_at,
-                locked_until=excluded.locked_until
-            """,
-            (username, failed_count, now.isoformat(), locked_until),
-        )
-        conn.commit()
-
-
-def clear_login_attempts(username: str):
-    username = s_clean(username)
-    with get_db_connection() as conn:
-        conn.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
-        conn.commit()
-
-
-def is_login_locked(username: str) -> Tuple[bool, str]:
-    locked_until = get_login_attempt(username).get("locked_until")
-    if not locked_until:
-        return False, ""
-    try:
-        locked_dt = datetime.fromisoformat(locked_until)
-    except Exception:
-        clear_login_attempts(username)
-        return False, ""
-    now = datetime.now(timezone.utc)
-    if now < locked_dt:
-        remaining = int((locked_dt - now).total_seconds() // 60) + 1
-        return True, f"Terlalu banyak percobaan login. Coba lagi sekitar {remaining} menit."
-    clear_login_attempts(username)
-    return False, ""
-
-
-def validate_username(username: str) -> Tuple[bool, str, str]:
-    cleaned = s_clean(username)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,30}", cleaned):
-        return False, "Username harus 3-30 karakter dan hanya boleh huruf, angka, titik, underscore, atau minus.", cleaned
-    return True, "", cleaned
-
-
-
-def validate_password(password: str) -> Tuple[bool, str]:
-    if len(password) < 6:
-        return False, "Password minimal 6 karakter."
-    return True, ""
-
-
-
-def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
-    ok, message, username = validate_username(username)
-    if not ok:
-        return False, message
-    ok, message = validate_password(password)
-    if not ok:
-        return False, message
-
-    if get_user_record(username):
-        return False, "Username sudah terdaftar."
-
-    salt, password_hash = hash_password(password)
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            INSERT INTO users(username, salt, password_hash, role, created_at, token_version)
-            VALUES (?, ?, ?, ?, ?, 1)
-            """,
-            (username, salt, password_hash, role, datetime.now(timezone.utc).isoformat()),
-        )
-        conn.commit()
-    append_audit_log("user_created", actor="admin", target=username)
-    return True, f"User {username} berhasil ditambahkan."
-
-
-
-def delete_user(target_username: str, current_username: str) -> Tuple[bool, str]:
-    target_username = s_clean(target_username)
-    current_username = s_clean(current_username)
-
-    if not get_user_record(target_username):
-        return False, "User tidak ditemukan."
-    if target_username == current_username:
-        return False, "Admin yang sedang login tidak bisa menghapus akun sendiri."
-
-    with get_db_connection() as conn:
-        conn.execute("DELETE FROM users WHERE username = ?", (target_username,))
-        conn.commit()
-    append_audit_log("user_deleted", actor=current_username or "admin", target=target_username)
-    return True, f"User {target_username} berhasil dihapus."
-
-
-
-def reset_user_password(target_username: str, new_password: str) -> Tuple[bool, str]:
-    target_username = s_clean(target_username)
-    if not get_user_record(target_username):
-        return False, "User tidak ditemukan."
-
-    ok, message = validate_password(new_password)
-    if not ok:
-        return False, message
-
-    salt, password_hash = hash_password(new_password)
-    with get_db_connection() as conn:
-        conn.execute(
-            """
-            UPDATE users
-            SET salt = ?, password_hash = ?, password_reset_at = ?, token_version = token_version + 1
-            WHERE username = ?
-            """,
-            (salt, password_hash, datetime.now(timezone.utc).isoformat(), target_username),
-        )
-        conn.commit()
-    append_audit_log("password_reset", actor="admin", target=target_username)
-    return True, f"Password user {target_username} berhasil di-reset."
-
-
-
-def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, List[Dict[str, str]]]:
-    required_columns = {"username", "password"}
-    normalized_columns = {str(col).strip().lower(): col for col in df.columns}
-    if not required_columns.issubset(set(normalized_columns.keys())):
-        return False, "File harus memiliki kolom: username dan password.", []
-
-    username_col = normalized_columns["username"]
-    password_col = normalized_columns["password"]
-    results: List[Dict[str, str]] = []
-
-    for idx, row in df.iterrows():
-        username = s_clean(row.get(username_col))
-        password = "" if pd.isna(row.get(password_col)) else str(row.get(password_col)).strip()
-
-        if not username and not password:
-            continue
-
-        ok, message = register_user(username, password)
-        results.append({
-            "row": str(idx + 2),
-            "username": username,
-            "status": "OK" if ok else "GAGAL",
-            "message": message,
-        })
-
-    if not results:
-        return False, "Tidak ada data user yang terbaca di file.", []
-
-    success_count = sum(1 for item in results if item["status"] == "OK")
-    fail_count = len(results) - success_count
-    summary = f"Import selesai. Berhasil: {success_count}, Gagal: {fail_count}."
-    return True, summary, results
-
-
-def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    username = s_clean(username)
-    locked, lock_message = is_login_locked(username)
-    if locked:
-        append_audit_log("login_blocked", actor=username, target=username, status="blocked")
-        return False, lock_message, None
-
-    user = get_user_record(username)
-    if not user:
-        record_failed_login(username)
-        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "user_not_found"})
-        return False, "Username tidak ditemukan.", None
-    if not verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
-        record_failed_login(username)
-        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "bad_password"})
-        return False, "Password salah.", None
-
-    clear_login_attempts(username)
-    append_audit_log("login_success", actor=username, target=username)
-    return True, "Login berhasil.", {
-        "username": username,
-        "role": user.get("role", "user"),
-        "token_version": int(user.get("token_version", 1)),
-    }
-
-
-def issue_token(user: Dict[str, Any]) -> str:
-    now = datetime.now(timezone.utc)
-    payload = {
-        "sub": user["username"],
-        "role": user.get("role", "user"),
-        "token_version": int(user.get("token_version", 1)),
-        "iat": now.timestamp(),
-        "exp": (now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp(),
-    }
-    return create_jwt(payload)
-
-
-def release_memory():
-    gc.collect()
-
-
-def clear_cached_results(except_key: Optional[str] = None):
-    for key in list(st.session_state.download_cache.keys()):
-        if except_key and key == except_key:
-            continue
-        st.session_state.download_cache.pop(key, None)
-    for key in list(st.session_state.summary_cache.keys()):
-        if except_key and key == except_key:
-            continue
-        st.session_state.summary_cache.pop(key, None)
-    release_memory()
-
-
-def begin_job(job_key: str, label: str):
-    current_key = st.session_state.get("active_job_key", "")
-    if current_key and current_key != job_key:
-        clear_cached_results()
-    st.session_state.active_job_key = job_key
-    st.session_state.active_job_label = label
-    release_memory()
-
-
-def logout():
-    st.session_state.auth_token = ""
-    st.session_state.auth_user = None
-    st.session_state.active_job_key = ""
-    st.session_state.active_job_label = ""
-    clear_cached_results()
-
-
-def get_current_user() -> Optional[Dict[str, Any]]:
-    token = st.session_state.get("auth_token", "")
-    if not token:
-        return None
-    try:
-        payload = decode_jwt(token)
-        user = get_user_record(payload.get("sub", ""))
-        if not user:
-            raise ValueError("User tidak ditemukan")
-        if int(payload.get("token_version", 0)) != int(user.get("token_version", 0)):
-            raise ValueError("Token tidak lagi valid")
-        return {
-            "username": user.get("username", ""),
-            "role": user.get("role", "user"),
-            "token_version": int(user.get("token_version", 1)),
-        }
-    except Exception:
-        logout()
-        return None
-
-
-def render_login_page() -> Optional[Dict[str, Any]]:
-    st.title(f"{APP_TITLE} - Login")
-
-    with st.form("login_form"):
-        username = st.text_input("Username", key="login_username")
-        password = st.text_input("Password", type="password", key="login_password")
-        submitted = st.form_submit_button("Login")
-        if submitted:
-            ok, message, user = authenticate_user(username, password)
-            if ok and user is not None:
-                st.session_state.auth_token = issue_token(user)
-                st.session_state.auth_user = user
-                st.success(message)
-                st.rerun()
-            else:
-                st.error(message)
-    return None
-
-
-
-def render_user_management(current_user: Dict[str, Any]):
-    st.title("Kelola User")
-    if current_user.get("role") != "admin":
-        st.error("Halaman ini hanya untuk admin.")
-        return
-
-    users = load_users()
-    user_rows = []
-    for username, info in sorted(users.items()):
-        user_rows.append({
-            "username": username,
-            "role": info.get("role", "user"),
-            "created_at": info.get("created_at", ""),
-            "password_reset_at": info.get("password_reset_at", ""),
-        })
-
-    st.subheader("Daftar User")
-    st.dataframe(pd.DataFrame(user_rows), use_container_width=True, hide_index=True)
-
-    tab_add, tab_bulk, tab_reset, tab_delete = st.tabs([
-        "Tambah User",
-        "Tambah User Massal",
-        "Reset Password",
-        "Hapus User",
-    ])
-
-    with tab_add:
-        with st.form("admin_add_user_form"):
-            new_username = st.text_input("Username baru")
-            new_password = st.text_input("Password baru", type="password")
-            confirm_password = st.text_input("Konfirmasi password", type="password")
-            submitted = st.form_submit_button("Tambah User")
-            if submitted:
-                if new_password != confirm_password:
-                    st.error("Konfirmasi password tidak sama.")
-                else:
-                    ok, message = register_user(new_username, new_password)
-                    if ok:
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-
-    with tab_bulk:
-        st.write("Upload file Excel (.xlsx) dengan kolom wajib: username, password")
-        sample_df = pd.DataFrame([
-            {"username": "andi", "password": "andi1234"},
-            {"username": "budi", "password": "budi1234"},
-        ])
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine="openpyxl") as writer:
-            sample_df.to_excel(writer, index=False, sheet_name="users")
-        st.download_button(
-            "Download Template Excel",
-            data=output.getvalue(),
-            file_name="template_import_user.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
-
-        bulk_file = st.file_uploader(
-            "Upload Excel user",
-            type=["xlsx"],
-            key="bulk_user_upload",
-            help="Kolom wajib: username, password",
-        )
-        if bulk_file is not None:
-            try:
-                df = pd.read_excel(bulk_file)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                if st.button("Proses Import User", key="process_bulk_user_import"):
-                    ok, summary, results = bulk_register_users_from_dataframe(df)
-                    if ok:
-                        st.success(summary)
-                        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
-                        st.rerun()
-                    else:
-                        st.error(summary)
-            except Exception as e:
-                st.error(f"Gagal membaca file Excel: {e}")
-
-    with tab_reset:
-        target_options = [u for u in users.keys()]
-        with st.form("admin_reset_password_form"):
-            target_username = st.selectbox("Pilih user", target_options, key="reset_target_username")
-            new_password = st.text_input("Password baru", type="password", key="reset_new_password")
-            confirm_password = st.text_input("Konfirmasi password", type="password", key="reset_confirm_password")
-            submitted = st.form_submit_button("Reset Password")
-            if submitted:
-                if new_password != confirm_password:
-                    st.error("Konfirmasi password tidak sama.")
-                else:
-                    ok, message = reset_user_password(target_username, new_password)
-                    if ok:
-                        st.success(message)
-                        st.rerun()
-                    else:
-                        st.error(message)
-
-    with tab_delete:
-        deletable_users = [u for u in users.keys() if u != current_user.get("username")]
-        if not deletable_users:
-            st.warning("Tidak ada user lain yang bisa dihapus.")
-        else:
-            with st.form("admin_delete_user_form"):
-                target_username = st.selectbox("Pilih user yang akan dihapus", deletable_users, key="delete_target_username")
-                confirmation = st.text_input("Ketik HAPUS untuk konfirmasi")
-                submitted = st.form_submit_button("Hapus User")
-                if submitted:
-                    if confirmation != "HAPUS":
-                        st.error("Konfirmasi tidak valid. Ketik HAPUS untuk melanjutkan.")
-                    else:
-                        ok, message = delete_user(target_username, current_user.get("username", ""))
-                        if ok:
-                            st.success(message)
-                            st.rerun()
-                        else:
-                            st.error(message)
-
-
-def require_authentication() -> Optional[Dict[str, Any]]:
-    return {"username": "local-user", "role": "admin"}
 
 
 # ============================================================
@@ -943,31 +259,13 @@ def make_issues_workbook(issues: List[Dict[str, Any]]) -> bytes:
     return workbook_to_bytes(wb)
 
 
-def format_duration(seconds: float) -> str:
-    seconds = max(0.0, float(seconds or 0.0))
-    if seconds < 60:
-        return f"{seconds:.2f} detik"
-    minutes = int(seconds // 60)
-    secs = seconds % 60
-    if minutes < 60:
-        return f"{minutes} menit {secs:.2f} detik"
-    hours = int(minutes // 60)
-    minutes = minutes % 60
-    return f"{hours} jam {minutes} menit {secs:.2f} detik"
-
-
 def render_summary(title: str, summary: Dict[str, Any]):
     st.subheader(title)
-    c1, c2, c3, c4, c5 = st.columns(5)
+    c1, c2, c3, c4 = st.columns(4)
     c1.metric("Jumlah File", int(summary.get("files_total", 0)))
     c2.metric("Baris Diperiksa", int(summary.get("rows_scanned", 0)))
     c3.metric("Baris Diupdate", int(summary.get("rows_written", 0)))
     c4.metric("Skip / Issue", int(summary.get("rows_unmatched", 0) + summary.get("issues_count", 0)))
-    c5.metric("Waktu Proses", format_duration(summary.get("elapsed_seconds", 0.0)))
-    elapsed = float(summary.get("elapsed_seconds", 0.0) or 0.0)
-    rows_scanned = int(summary.get("rows_scanned", 0) or 0)
-    if elapsed > 0 and rows_scanned > 0:
-        st.caption(f"Kecepatan: {rows_scanned / elapsed:,.0f} baris/detik")
 
 
 def cache_downloads(
@@ -986,13 +284,6 @@ def cache_downloads(
     }
     if summary is not None:
         st.session_state.summary_cache[cache_key] = summary
-
-
-def run_timed_process(fn, *args, **kwargs):
-    start = time.perf_counter()
-    result = fn(*args, **kwargs)
-    elapsed = time.perf_counter() - start
-    return result, elapsed
 
 
 def render_downloads(cache_key: str):
@@ -1131,7 +422,6 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
     return sku_map, sorted(areas)
 
 
-@st.cache_data(show_spinner=False, ttl=600)
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
     for sname in wb.sheetnames:
@@ -1146,11 +436,8 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
         merged_lookup.update(sku_map)
         areas_all |= set(areas)
     if not merged_lookup:
-        wb.close()
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
-    out = (merged_lookup, sorted(areas_all))
-    wb.close()
-    return out
+    return merged_lookup, sorted(areas_all)
 
 
 def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]) -> Optional[int]:
@@ -1380,9 +667,8 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: s
 # ============================================================
 # PRICE LOADERS
 # ============================================================
-@st.cache_data(show_spinner=False, ttl=600)
 def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
-    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True, read_only=True)
+    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True)
     ws = wb.active
     code_candidates = ["addon_code", "ADDON_CODE", "Addon Code", "Kode", "KODE", "KODE ADDON", "KODE_ADDON", "Standarisasi Kode SKU di Varian"]
     price_candidates = ["harga", "HARGA", "Price", "PRICE", "Harga"]
@@ -1408,7 +694,6 @@ def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
         if price_raw is None:
             continue
         addon_map[code] = int(apply_multiplier_if_needed(price_raw))
-    wb.close()
     return addon_map
 
 
@@ -1437,9 +722,8 @@ def find_header_row_and_cols_pricelist_fixed(ws: Worksheet, required_price_cols:
     )
 
 
-@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[str, Dict[str, int]]:
-    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=True)
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
     ws = get_change_sheet(wb)
     header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
     result: Dict[str, Dict[str, int]] = {}
@@ -1452,11 +736,9 @@ def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[st
             raw = parse_price_cell(ws.cell(row=r, column=col).value)
             if raw is not None:
                 result[sku][label] = int(apply_multiplier_if_needed(raw))
-    wb.close()
     return result
 
 
-@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map_multisheet(
     pl_bytes: bytes,
     needed_cols: List[str],
@@ -1531,17 +813,14 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # PRICE PROCESSORS
 # ============================================================
 def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
-    pricelist_bytes = pricelist_file.getvalue()
-    addon_bytes = addon_file.getvalue()
-    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_bytes)
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        mf_bytes = mf.getvalue()
-        wb = load_workbook(io.BytesIO(mf_bytes))
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
 
         if mode == "normal":
@@ -1597,12 +876,14 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
             summary["rows_written"] += 1
 
         if changed_rows:
-            batch_delete_unkept_rows(ws, data_start_fixed, set(changed_rows))
+            keep = set(changed_rows)
+            for r in range(ws.max_row, data_start_fixed - 1, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
 
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
-        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1610,25 +891,20 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
-
 def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    pricelist_bytes = pricelist_file.getvalue()
-    addon_bytes = addon_file.getvalue()
-    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_bytes)
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        mf_bytes = mf.getvalue()
-        wb = load_workbook(io.BytesIO(mf_bytes))
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update TikTokShop tidak sesuai."})
-            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1650,11 +926,13 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
             summary["rows_written"] += 1
 
         if changed_rows:
-            batch_delete_unkept_rows(ws, 6, set(changed_rows))
+            keep = set(changed_rows)
+            for r in range(ws.max_row, 5, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_harga_normal_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
-        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1662,25 +940,20 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
     return zip_named_files(output_files), "hasil_harga_normal_tiktokshop.zip", make_issues_workbook(issues) if issues else None, summary
 
 
-
 def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
-    pricelist_bytes = pricelist_file.getvalue()
-    addon_bytes = addon_file.getvalue()
-    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_bytes)
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        mf_bytes = mf.getvalue()
-        wb = load_workbook(io.BytesIO(mf_bytes))
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update PowerMerchant tidak sesuai."})
-            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1702,17 +975,18 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
             summary["rows_written"] += 1
 
         if changed_rows:
-            batch_delete_unkept_rows(ws, 6, set(changed_rows))
+            keep = set(changed_rows)
+            for r in range(ws.max_row, 5, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
-        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
         return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
-
 
 
 def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
@@ -1927,7 +1201,7 @@ def process_submit_campaign_tiktokshop(
             })
             continue
 
-        matched_rows_data: List[List[Any]] = []
+        changed_rows_data: List[List[Any]] = []
 
         for r in range(data_start, src_ws.max_row + 1):
             sku_full = s_clean(src_ws.cell(row=r, column=sku_col).value)
@@ -1952,10 +1226,13 @@ def process_submit_campaign_tiktokshop(
                 })
                 continue
 
+            if old_price is not None and int(old_price) == int(new_price):
+                continue
+
             row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
             if price_col - 1 < len(row_vals):
                 row_vals[price_col - 1] = int(new_price)
-            matched_rows_data.append(row_vals)
+            changed_rows_data.append(row_vals)
             summary["rows_written"] += 1
 
         out_wb = Workbook()
@@ -1966,14 +1243,14 @@ def process_submit_campaign_tiktokshop(
             out_ws.cell(row=1, column=c, value=src_ws.cell(row=1, column=c).value)
             out_ws.cell(row=2, column=c, value=src_ws.cell(row=2, column=c).value)
 
-        if matched_rows_data:
-            for out_r, row_vals in enumerate(matched_rows_data, start=data_start):
+        if changed_rows_data:
+            for out_r, row_vals in enumerate(changed_rows_data, start=data_start):
                 for c, val in enumerate(row_vals, start=1):
                     out_ws.cell(row=out_r, column=c, value=val)
         else:
             issues.append({
                 "file": mf.name,
-                "reason": "Tidak ada SKU yang match pada pricelist untuk file ini.",
+                "reason": "Tidak ada baris berubah pada file ini.",
             })
 
         output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(out_wb)))
@@ -2007,65 +1284,14 @@ def page_header(title: str, desc: str, requirements: List[str]):
             st.write(f"- {item}")
 
 
-def uploaded_file_size_mb(file_obj: Any) -> float:
-    return len(file_obj.getvalue()) / (1024 * 1024)
-
-
-def validate_uploaded_xlsx(file_obj: Any, max_file_mb: int) -> Optional[str]:
-    if file_obj is None:
-        return None
-    size_mb = uploaded_file_size_mb(file_obj)
-    if size_mb > max_file_mb:
-        return f"File {getattr(file_obj, 'name', 'input')} melebihi {max_file_mb} MB."
-    try:
-        with zipfile.ZipFile(io.BytesIO(file_obj.getvalue())) as zf:
-            infos = zf.infolist()
-            if len(infos) > MAX_XLSX_ENTRIES:
-                return f"File {getattr(file_obj, 'name', 'input')} terlalu kompleks."
-            total_uncompressed = sum(info.file_size for info in infos)
-            if total_uncompressed > MAX_XLSX_UNCOMPRESSED_MB * 1024 * 1024:
-                return f"File {getattr(file_obj, 'name', 'input')} terlalu besar saat diekstrak."
-            for info in infos:
-                normalized = info.filename.replace("\\", "/")
-                if ".." in normalized.split("/"):
-                    return f"File {getattr(file_obj, 'name', 'input')} tidak valid."
-    except zipfile.BadZipFile:
-        return f"File {getattr(file_obj, 'name', 'input')} bukan XLSX yang valid."
-    return None
-
-
-def validate_mass_uploads(mass_files: List[Any], profile: str = "generic") -> Optional[str]:
+def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
     if not mass_files:
         return "Upload file mass update minimal 1 file."
-
-    profiles = {
-        "shopee": (MAX_SHOPEE_FILES, MAX_SHOPEE_FILE_MB),
-        "tiktok": (MAX_TIKTOK_FILES, MAX_TIKTOK_FILE_MB),
-        "bigseller": (MAX_BIGSELLER_FILES, MAX_BIGSELLER_FILE_MB),
-        "generic": (MAX_MASS_FILES, MAX_GENERIC_INPUT_FILE_MB),
-    }
-    max_files, max_file_mb = profiles.get(profile, profiles["generic"])
-
-    if len(mass_files) > max_files:
-        return f"Maksimal {max_files} file per proses."
+    if len(mass_files) > MAX_MASS_FILES:
+        return f"Maksimal {MAX_MASS_FILES} file per proses."
     if total_upload_size_mb(mass_files) > MAX_TOTAL_UPLOAD_MB:
         return f"Total upload melebihi {MAX_TOTAL_UPLOAD_MB} MB."
-
-    for f in mass_files:
-        err = validate_uploaded_xlsx(f, max_file_mb)
-        if err:
-            return err
     return None
-
-
-def validate_single_upload(file_obj: Any, profile: str) -> Optional[str]:
-    limits = {
-        "pricelist": MAX_PRICELIST_FILE_MB,
-        "addon": MAX_ADDON_FILE_MB,
-        "generic": MAX_GENERIC_INPUT_FILE_MB,
-        "tiktok": MAX_TIKTOK_FILE_MB,
-    }
-    return validate_uploaded_xlsx(file_obj, limits.get(profile, MAX_GENERIC_INPUT_FILE_MB))
 
 
 # ============================================================
@@ -2122,21 +1348,15 @@ def render_update_stok_shopee():
     process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
 
     if st.button("Proses", key="btn_stock_shopee", disabled=process_disabled):
-        begin_job("stock_shopee", "Update Stok Shopee")
-        err = validate_mass_uploads(mass_files, "shopee")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        if pl_err:
-            st.error(pl_err)
             return
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
             return
         try:
-            (result_bytes, issues_bytes, summary), elapsed = run_timed_process(process_stock_shopee, mass_files, pricelist_file, mode, chosen_areas)
-            summary["elapsed_seconds"] = elapsed
+            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, mode, chosen_areas)
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2177,21 +1397,15 @@ def render_update_stok_tiktokshop():
     process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
 
     if st.button("Proses", key="btn_stock_tiktokshop", disabled=process_disabled):
-        begin_job("stock_tiktokshop", "Update Stok TikTokShop")
-        err = validate_mass_uploads(mass_files, "tiktok")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        if pl_err:
-            st.error(pl_err)
             return
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
             return
         try:
-            (result_bytes, issues_bytes, summary), elapsed = run_timed_process(process_stock_tiktokshop, mass_files, pricelist_file, mode, chosen_areas)
-            summary["elapsed_seconds"] = elapsed
+            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, mode, chosen_areas)
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2216,24 +1430,17 @@ def render_harga_normal_shopee():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_shopee_disc")
 
     if st.button("Proses", key="btn_normal_shopee"):
-        begin_job("normal_shopee", "Harga Normal Shopee")
-        err = validate_mass_uploads(mass_files, "shopee")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
-                process_shopee_price_files, mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
+            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
+                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
             )
-            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2258,15 +1465,9 @@ def render_harga_coret_shopee():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_shopee_disc")
 
     if st.button("Proses", key="btn_coret_shopee"):
-        begin_job("coret_shopee", "Harga Coret Shopee")
-        err = validate_mass_uploads(mass_files, "shopee")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2299,24 +1500,17 @@ def render_harga_normal_tiktokshop():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_tiktokshop_disc")
 
     if st.button("Proses", key="btn_normal_tiktokshop"):
-        begin_job("normal_tiktokshop", "Harga Normal TikTokShop")
-        err = validate_mass_uploads(mass_files, "tiktok")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
-                process_tiktokshop_price_normal, mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_normal(
+                mass_files, pricelist_file, addon_file, discount_rp
             )
-            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2341,13 +1535,6 @@ def render_harga_coret_tiktokshop():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_tiktokshop_disc")
 
     if st.button("Proses", key="btn_coret_tiktokshop"):
-        begin_job("coret_tiktokshop", "Harga Coret TikTokShop")
-        input_err = validate_single_upload(input_file, "tiktok")
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if input_err or pl_err or add_err:
-            st.error(input_err or pl_err or add_err)
-            return
         if not input_file or not pricelist_file or not addon_file:
             st.error("Upload semua file yang dibutuhkan dulu.")
             return
@@ -2379,15 +1566,9 @@ def render_harga_normal_powemerchant():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_pm_disc")
 
     if st.button("Proses", key="btn_normal_pm"):
-        begin_job("normal_pm", "Harga Normal PowerMerchant")
-        err = validate_mass_uploads(mass_files, "generic")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2420,15 +1601,9 @@ def render_harga_coret_powemerchant():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_pm_disc")
 
     if st.button("Proses", key="btn_coret_pm"):
-        begin_job("coret_pm", "Harga Coret PowerMerchant")
-        err = validate_mass_uploads(mass_files, "generic")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2461,24 +1636,17 @@ def render_harga_normal_bigseller():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_bigseller_disc")
 
     if st.button("Proses", key="btn_normal_bigseller"):
-        begin_job("normal_bigseller", "Harga Normal Bigseller")
-        err = validate_mass_uploads(mass_files, "bigseller")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
-                process_bigseller, mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = process_bigseller(
+                mass_files, pricelist_file, addon_file, discount_rp
             )
-            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2499,7 +1667,7 @@ def render_submit_campaign_shopee():
 def render_submit_campaign_tiktokshop():
     page_header(
         "Submit Campaign TikTokShop",
-        "Memproses file submit campaign TikTokShop. Output mengambil semua SKU yang ada di pricelist.",
+        "Memproses file submit campaign TikTokShop. Output hanya mengambil row yang berubah.",
         [
             "Template Campaign Tiktokshop (.xlsx)",
             "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
@@ -2544,16 +1712,9 @@ def render_submit_campaign_tiktokshop():
     )
 
     if st.button("Proses", key="btn_submit_campaign_tiktokshop"):
-        begin_job("submit_campaign_tiktokshop", "Submit Campaign TikTokShop")
-        err = validate_mass_uploads(mass_files, "tiktok")
+        err = validate_mass_uploads(mass_files)
         if err:
             st.error(err)
-            return
-
-        pl_err = validate_single_upload(pricelist_file, "pricelist")
-        add_err = validate_single_upload(addon_file, "addon")
-        if pl_err or add_err:
-            st.error(pl_err or add_err)
             return
 
         if not pricelist_file or not addon_file:
@@ -2585,18 +1746,12 @@ def render_submit_campaign_tiktokshop():
 # ============================================================
 # SIDEBAR ROUTER
 # ============================================================
-def build_menu(user: Dict[str, Any]) -> str:
+def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
-    st.sidebar.info("Mode cepat: login dimatikan")
-    active_job_label = st.session_state.get("active_job_label", "")
-    if active_job_label:
-        st.sidebar.info(f"Proses aktif terakhir: {active_job_label}")
-
-    main_menu_options = ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"]
 
     group = st.sidebar.radio(
         "Menu Utama",
-        main_menu_options,
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"],
         key="sidebar_main_menu",
     )
 
@@ -2650,7 +1805,6 @@ def build_menu(user: Dict[str, Any]) -> str:
         else:
             route = "submit_campaign_tiktokshop"
 
-
     else:
         route = "dashboard"
 
@@ -2666,11 +1820,7 @@ def build_menu(user: Dict[str, Any]) -> str:
 
 
 def main():
-    user = require_authentication()
-    if not user:
-        return
-
-    route = build_menu(user)
+    route = build_menu()
     if route == "dashboard":
         render_dashboard()
     elif route == "update_stok_shopee":
