@@ -6,8 +6,10 @@ import json
 import os
 import re
 import secrets
-import stat
+import sqlite3
 import zipfile
+import gc
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -21,24 +23,33 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "The Codex"
-MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "50"))
-MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "200"))
-MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "25"))
+APP_TITLE = "The Codex Final"
+MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "30"))
+MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "40"))
+MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "20"))
 MAX_XLSX_ENTRIES = int(os.environ.get("APP_MAX_XLSX_ENTRIES", "20000"))
-MAX_XLSX_UNCOMPRESSED_MB = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "250"))
+MAX_XLSX_UNCOMPRESSED_MB = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "120"))
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
 
-AUTH_FILE = "users_local.json"
-LOGIN_ATTEMPT_FILE = "login_attempts.json"
-AUDIT_LOG_FILE = "security_audit.log"
+MAX_SHOPEE_FILES = int(os.environ.get("APP_MAX_SHOPEE_FILES", "5"))
+MAX_TIKTOK_FILES = int(os.environ.get("APP_MAX_TIKTOK_FILES", "3"))
+MAX_BIGSELLER_FILES = int(os.environ.get("APP_MAX_BIGSELLER_FILES", "30"))
+MAX_SHOPEE_FILE_MB = int(os.environ.get("APP_MAX_SHOPEE_FILE_MB", "3"))
+MAX_TIKTOK_FILE_MB = int(os.environ.get("APP_MAX_TIKTOK_FILE_MB", "8"))
+MAX_BIGSELLER_FILE_MB = int(os.environ.get("APP_MAX_BIGSELLER_FILE_MB", "3"))
+MAX_PRICELIST_FILE_MB = int(os.environ.get("APP_MAX_PRICELIST_FILE_MB", "20"))
+MAX_ADDON_FILE_MB = int(os.environ.get("APP_MAX_ADDON_FILE_MB", "1"))
+MAX_GENERIC_INPUT_FILE_MB = int(os.environ.get("APP_MAX_GENERIC_INPUT_FILE_MB", "8"))
+
+AUTH_DB = "codexid_auth.sqlite3"
+LEGACY_AUTH_FILE = "users_local.json"
 JWT_SECRET = os.environ.get("APP_JWT_SECRET", "").strip()
 JWT_ALGORITHM = "HS256"
 JWT_EXPIRE_HOURS = int(os.environ.get("APP_JWT_EXPIRE_HOURS", "8"))
+DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
 PASSWORD_HASH_SCHEME = "pbkdf2_sha256"
 PASSWORD_HASH_ITERATIONS = int(os.environ.get("APP_PASSWORD_HASH_ITERATIONS", "310000"))
-DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
-BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "")
+DEFAULT_ADMIN_PASSWORD = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "").strip()
 FAILED_LOGIN_WINDOW_MINUTES = int(os.environ.get("APP_FAILED_LOGIN_WINDOW_MINUTES", "15"))
 FAILED_LOGIN_MAX_ATTEMPTS = int(os.environ.get("APP_FAILED_LOGIN_MAX_ATTEMPTS", "5"))
 LOGIN_LOCKOUT_MINUTES = int(os.environ.get("APP_LOGIN_LOCKOUT_MINUTES", "15"))
@@ -56,84 +67,92 @@ SESSION_DEFAULTS = {
     "stock_tiktokshop_areas_loaded": [],
     "auth_token": "",
     "auth_user": None,
-    "security_bootstrap_checked": False,
+    "active_job_key": "",
+    "active_job_label": "",
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
 
+
+
 # ============================================================
-# AUTH HELPERS (LOCAL JSON + JWT)
+# AUTH HELPERS (SQLITE + JWT)
 # ============================================================
-def get_auth_file_path() -> str:
-    return os.path.join(os.path.dirname(__file__), AUTH_FILE)
+def get_auth_db_path() -> str:
+    return os.path.join(os.path.dirname(__file__), AUTH_DB)
 
 
-def get_login_attempt_file_path() -> str:
-    return os.path.join(os.path.dirname(__file__), LOGIN_ATTEMPT_FILE)
+def get_legacy_auth_file_path() -> str:
+    return os.path.join(os.path.dirname(__file__), LEGACY_AUTH_FILE)
 
 
-def get_audit_log_path() -> str:
-    return os.path.join(os.path.dirname(__file__), AUDIT_LOG_FILE)
+def get_db_connection() -> sqlite3.Connection:
+    conn = sqlite3.connect(get_auth_db_path(), check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    return conn
 
 
-def utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+def init_auth_db():
+    with get_db_connection() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                username TEXT PRIMARY KEY,
+                salt TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'user',
+                created_at TEXT NOT NULL,
+                password_reset_at TEXT,
+                token_version INTEGER NOT NULL DEFAULT 1
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS login_attempts (
+                username TEXT PRIMARY KEY,
+                failed_count INTEGER NOT NULL DEFAULT 0,
+                last_failed_at TEXT,
+                locked_until TEXT
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS audit_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TEXT NOT NULL,
+                event TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                target TEXT,
+                status TEXT NOT NULL,
+                details_json TEXT
+            )
+        """)
+        conn.commit()
+
+
+def append_audit_log(event: str, actor: str = "system", target: str = "", status: str = "ok", details: Optional[Dict[str, Any]] = None):
+    try:
+        with get_db_connection() as conn:
+            conn.execute(
+                "INSERT INTO audit_logs(ts, event, actor, target, status, details_json) VALUES (?, ?, ?, ?, ?, ?)",
+                (datetime.now(timezone.utc).isoformat(), event, actor, target, status, json.dumps(details or {}, ensure_ascii=False)),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def file_exists_and_nonempty(path: str) -> bool:
     return os.path.exists(path) and os.path.getsize(path) > 0
 
 
-def ensure_private_file(path: str):
-    try:
-        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
-    except Exception:
-        pass
-
-
-def atomic_write_json(path: str, payload: Any):
-    temp_path = f"{path}.tmp"
-    with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(temp_path, path)
-    ensure_private_file(path)
-
-
-def append_audit_log(event: str, actor: str = "system", target: str = "", status: str = "ok", details: Optional[Dict[str, Any]] = None):
-    record = {
-        "ts": utc_now().isoformat(),
-        "event": event,
-        "actor": actor,
-        "target": target,
-        "status": status,
-        "details": details or {},
-    }
-    path = get_audit_log_path()
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    ensure_private_file(path)
-
-
-def load_json_file(path: str, default: Any) -> Any:
-    if not os.path.exists(path):
-        return default
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data
-    except Exception:
-        append_audit_log("json_load_failed", status="error", details={"path": os.path.basename(path)})
-        return default
-
-
 def get_security_bootstrap_issues() -> List[str]:
     issues: List[str] = []
-    auth_exists = file_exists_and_nonempty(get_auth_file_path())
+    auth_exists = file_exists_and_nonempty(get_auth_db_path())
     if not JWT_SECRET or JWT_SECRET.lower() == "ganti-secret-ini-di-production":
         issues.append("APP_JWT_SECRET wajib di-set dan tidak boleh pakai nilai default.")
-    if not auth_exists and not BOOTSTRAP_ADMIN_PASSWORD:
+    if not auth_exists and not DEFAULT_ADMIN_PASSWORD:
         issues.append("APP_BOOTSTRAP_ADMIN_PASSWORD wajib di-set saat pertama kali bootstrap admin.")
     return issues
 
@@ -151,6 +170,42 @@ def ensure_security_bootstrap() -> bool:
         language="bash",
     )
     return False
+
+
+def migrate_legacy_auth_json_if_needed():
+    legacy_path = Path(get_legacy_auth_file_path())
+    if not legacy_path.exists():
+        return
+    with get_db_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count > 0:
+            return
+        try:
+            legacy_data = json.loads(legacy_path.read_text(encoding="utf-8"))
+        except Exception:
+            append_audit_log("legacy_auth_migration_failed", status="error")
+            return
+        if not isinstance(legacy_data, dict):
+            return
+        for username, info in legacy_data.items():
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO users
+                (username, salt, password_hash, role, created_at, password_reset_at, token_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    info.get("salt", ""),
+                    info.get("password_hash", ""),
+                    info.get("role", "user"),
+                    info.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    info.get("password_reset_at"),
+                    int(info.get("token_version", 1)),
+                ),
+            )
+        conn.commit()
+        append_audit_log("legacy_auth_migrated", details={"users": len(legacy_data)})
 
 
 def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
@@ -229,92 +284,150 @@ def decode_jwt(token: str) -> Dict[str, Any]:
     exp = payload.get("exp")
     if exp is None:
         raise ValueError("Token tidak memiliki expiry")
-    if utc_now().timestamp() > float(exp):
+    if datetime.now(timezone.utc).timestamp() > float(exp):
         raise ValueError("Token sudah expired")
     return payload
 
 
-def bootstrap_admin_user() -> Dict[str, Dict[str, Any]]:
-    salt, password_hash = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
-    default_users = {
-        DEFAULT_ADMIN_USERNAME: {
-            "salt": salt,
-            "password_hash": password_hash,
-            "role": "admin",
-            "created_at": utc_now().isoformat(),
-            "password_reset_at": utc_now().isoformat(),
-            "token_version": 1,
-            "password_algo": PASSWORD_HASH_SCHEME,
-        }
-    }
-    atomic_write_json(get_auth_file_path(), default_users)
-    append_audit_log("bootstrap_admin_created", target=DEFAULT_ADMIN_USERNAME)
-    return default_users
+def bootstrap_admin_if_needed():
+    if not ensure_security_bootstrap():
+        return
+    with get_db_connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+        if count > 0:
+            return
+        salt, password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO users(username, salt, password_hash, role, created_at, password_reset_at, token_version) VALUES (?, ?, ?, 'admin', ?, ?, 1)",
+            (DEFAULT_ADMIN_USERNAME, salt, password_hash, now_iso, now_iso),
+        )
+        conn.commit()
+        append_audit_log("bootstrap_admin", target=DEFAULT_ADMIN_USERNAME)
+
+
+init_auth_db()
+migrate_legacy_auth_json_if_needed()
+bootstrap_admin_if_needed()
 
 
 def load_users() -> Dict[str, Dict[str, Any]]:
-    path = get_auth_file_path()
-    if not os.path.exists(path):
-        return bootstrap_admin_user()
-    data = load_json_file(path, {})
-    return data if isinstance(data, dict) else {}
+    with get_db_connection() as conn:
+        rows = conn.execute(
+            "SELECT username, salt, password_hash, role, created_at, password_reset_at, token_version FROM users ORDER BY username"
+        ).fetchall()
+    return {
+        row["username"]: {
+            "salt": row["salt"],
+            "password_hash": row["password_hash"],
+            "role": row["role"],
+            "created_at": row["created_at"],
+            "password_reset_at": row["password_reset_at"] or "",
+            "token_version": int(row["token_version"]),
+        }
+        for row in rows
+    }
+
+
+def get_user_record(username: str) -> Optional[Dict[str, Any]]:
+    username = s_clean(username)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT username, salt, password_hash, role, created_at, password_reset_at, token_version FROM users WHERE username = ?",
+            (username,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 def save_users(users: Dict[str, Dict[str, Any]]):
-    atomic_write_json(get_auth_file_path(), users)
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM users")
+        for username, info in users.items():
+            conn.execute(
+                """
+                INSERT INTO users(username, salt, password_hash, role, created_at, password_reset_at, token_version)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    username,
+                    info.get("salt", ""),
+                    info.get("password_hash", ""),
+                    info.get("role", "user"),
+                    info.get("created_at") or datetime.now(timezone.utc).isoformat(),
+                    info.get("password_reset_at"),
+                    int(info.get("token_version", 1)),
+                ),
+            )
+        conn.commit()
 
 
-def load_login_attempts() -> Dict[str, Dict[str, Any]]:
-    path = get_login_attempt_file_path()
-    data = load_json_file(path, {})
-    return data if isinstance(data, dict) else {}
+def get_login_attempt(username: str) -> Dict[str, Any]:
+    username = s_clean(username)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT failed_count, last_failed_at, locked_until FROM login_attempts WHERE username = ?",
+            (username,),
+        ).fetchone()
+    if not row:
+        return {"failed_count": 0, "last_failed_at": None, "locked_until": None}
+    return dict(row)
 
 
-def save_login_attempts(payload: Dict[str, Dict[str, Any]]):
-    atomic_write_json(get_login_attempt_file_path(), payload)
+def record_failed_login(username: str):
+    username = s_clean(username)
+    now = datetime.now(timezone.utc)
+    with get_db_connection() as conn:
+        row = conn.execute(
+            "SELECT failed_count, last_failed_at FROM login_attempts WHERE username = ?",
+            (username,),
+        ).fetchone()
+        failed_count = 1
+        if row and row["last_failed_at"]:
+            try:
+                last_failed = datetime.fromisoformat(row["last_failed_at"])
+            except Exception:
+                last_failed = now
+            if (now - last_failed).total_seconds() / 60.0 <= FAILED_LOGIN_WINDOW_MINUTES:
+                failed_count = int(row["failed_count"] or 0) + 1
+        locked_until = None
+        if failed_count >= FAILED_LOGIN_MAX_ATTEMPTS:
+            locked_until = (now + timedelta(minutes=LOGIN_LOCKOUT_MINUTES)).isoformat()
+        conn.execute(
+            """
+            INSERT INTO login_attempts(username, failed_count, last_failed_at, locked_until)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(username) DO UPDATE SET
+                failed_count=excluded.failed_count,
+                last_failed_at=excluded.last_failed_at,
+                locked_until=excluded.locked_until
+            """,
+            (username, failed_count, now.isoformat(), locked_until),
+        )
+        conn.commit()
 
 
-def cleanup_login_attempts(attempts: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
-    now_ts = utc_now().timestamp()
-    fresh: Dict[str, Dict[str, Any]] = {}
-    for username, info in attempts.items():
-        locked_until = float(info.get("locked_until", 0) or 0)
-        last_failed = float(info.get("last_failed_at", 0) or 0)
-        if locked_until > now_ts or (now_ts - last_failed) <= FAILED_LOGIN_WINDOW_MINUTES * 60:
-            fresh[username] = info
-    return fresh
+def clear_login_attempts(username: str):
+    username = s_clean(username)
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM login_attempts WHERE username = ?", (username,))
+        conn.commit()
 
 
-def get_login_lock_message(username: str) -> Optional[str]:
-    attempts = cleanup_login_attempts(load_login_attempts())
-    info = attempts.get(username, {})
-    locked_until = float(info.get("locked_until", 0) or 0)
-    now_ts = utc_now().timestamp()
-    if locked_until > now_ts:
-        remaining_min = max(1, int((locked_until - now_ts) // 60) + 1)
-        return f"Akun sementara dikunci karena terlalu banyak percobaan login gagal. Coba lagi sekitar {remaining_min} menit lagi."
-    return None
-
-
-def register_failed_login(username: str):
-    attempts = cleanup_login_attempts(load_login_attempts())
-    now_ts = utc_now().timestamp()
-    info = attempts.get(username, {"count": 0, "locked_until": 0, "last_failed_at": 0})
-    if now_ts - float(info.get("last_failed_at", 0) or 0) > FAILED_LOGIN_WINDOW_MINUTES * 60:
-        info["count"] = 0
-    info["count"] = int(info.get("count", 0)) + 1
-    info["last_failed_at"] = now_ts
-    if info["count"] >= FAILED_LOGIN_MAX_ATTEMPTS:
-        info["locked_until"] = now_ts + (LOGIN_LOCKOUT_MINUTES * 60)
-    attempts[username] = info
-    save_login_attempts(attempts)
-
-
-def clear_failed_login(username: str):
-    attempts = cleanup_login_attempts(load_login_attempts())
-    if username in attempts:
-        del attempts[username]
-        save_login_attempts(attempts)
+def is_login_locked(username: str) -> Tuple[bool, str]:
+    locked_until = get_login_attempt(username).get("locked_until")
+    if not locked_until:
+        return False, ""
+    try:
+        locked_dt = datetime.fromisoformat(locked_until)
+    except Exception:
+        clear_login_attempts(username)
+        return False, ""
+    now = datetime.now(timezone.utc)
+    if now < locked_dt:
+        remaining = int((locked_dt - now).total_seconds() // 60) + 1
+        return True, f"Terlalu banyak percobaan login. Coba lagi sekitar {remaining} menit."
+    clear_login_attempts(username)
+    return False, ""
 
 
 def validate_username(username: str) -> Tuple[bool, str, str]:
@@ -325,93 +438,90 @@ def validate_username(username: str) -> Tuple[bool, str, str]:
 
 
 
-def validate_password(password: str, username: str = "") -> Tuple[bool, str]:
+def validate_password(password: str) -> Tuple[bool, str]:
     password = password or ""
-    if len(password) < 3:
-        return False, "Password minimal 12 karakter."
-    if username and username.lower() in password.lower():
-        return False, "Password tidak boleh mengandung username."
-    checks = [
-        (r"[A-Z]", "minimal 1 huruf besar"),
-        (r"[a-z]", "minimal 1 huruf kecil"),
-        (r"[0-9]", "minimal 1 angka"),
-        (r"[^A-Za-z0-9]", "minimal 1 simbol"),
-    ]
-    missing = [label for pattern, label in checks if not re.search(pattern, password)]
-    if missing:
-        return False, "Password harus mengandung " + ", ".join(missing) + "."
+    if len(password) < 10:
+        return False, "Password minimal 10 karakter."
+    if not re.search(r"[A-Z]", password):
+        return False, "Password wajib mengandung huruf besar."
+    if not re.search(r"[a-z]", password):
+        return False, "Password wajib mengandung huruf kecil."
+    if not re.search(r"\d", password):
+        return False, "Password wajib mengandung angka."
+    if not re.search(r"[^A-Za-z0-9]", password):
+        return False, "Password wajib mengandung simbol."
     return True, ""
 
 
-def register_user(username: str, password: str, role: str = "user", actor: str = "system") -> Tuple[bool, str]:
+def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
     ok, message, username = validate_username(username)
     if not ok:
         return False, message
-    ok, message = validate_password(password, username=username)
+    ok, message = validate_password(password)
     if not ok:
         return False, message
 
-    users = load_users()
-    if username in users:
+    if get_user_record(username):
         return False, "Username sudah terdaftar."
 
     salt, password_hash = hash_password(password)
-    users[username] = {
-        "salt": salt,
-        "password_hash": password_hash,
-        "role": role,
-        "created_at": utc_now().isoformat(),
-        "password_reset_at": utc_now().isoformat(),
-        "token_version": 1,
-        "password_algo": PASSWORD_HASH_SCHEME,
-    }
-    save_users(users)
-    append_audit_log("user_created", actor=actor, target=username)
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            INSERT INTO users(username, salt, password_hash, role, created_at, token_version)
+            VALUES (?, ?, ?, ?, ?, 1)
+            """,
+            (username, salt, password_hash, role, datetime.now(timezone.utc).isoformat()),
+        )
+        conn.commit()
+    append_audit_log("user_created", actor="admin", target=username)
     return True, f"User {username} berhasil ditambahkan."
 
 
 
 def delete_user(target_username: str, current_username: str) -> Tuple[bool, str]:
-    users = load_users()
     target_username = s_clean(target_username)
     current_username = s_clean(current_username)
 
-    if target_username not in users:
+    if not get_user_record(target_username):
         return False, "User tidak ditemukan."
     if target_username == current_username:
         return False, "Admin yang sedang login tidak bisa menghapus akun sendiri."
 
-    del users[target_username]
-    save_users(users)
-    append_audit_log("user_deleted", actor=current_username, target=target_username)
+    with get_db_connection() as conn:
+        conn.execute("DELETE FROM users WHERE username = ?", (target_username,))
+        conn.commit()
+    append_audit_log("user_deleted", actor=current_username or "admin", target=target_username)
     return True, f"User {target_username} berhasil dihapus."
 
 
 
-def reset_user_password(target_username: str, new_password: str, actor: str = "system") -> Tuple[bool, str]:
-    users = load_users()
+def reset_user_password(target_username: str, new_password: str) -> Tuple[bool, str]:
     target_username = s_clean(target_username)
-    if target_username not in users:
+    if not get_user_record(target_username):
         return False, "User tidak ditemukan."
 
-    ok, message = validate_password(new_password, username=target_username)
+    ok, message = validate_password(new_password)
     if not ok:
         return False, message
 
     salt, password_hash = hash_password(new_password)
-    users[target_username]["salt"] = salt
-    users[target_username]["password_hash"] = password_hash
-    users[target_username]["password_reset_at"] = utc_now().isoformat()
-    users[target_username]["password_algo"] = PASSWORD_HASH_SCHEME
-    users[target_username]["token_version"] = int(users[target_username].get("token_version", 0)) + 1
-    save_users(users)
-    clear_failed_login(target_username)
-    append_audit_log("password_reset", actor=actor, target=target_username)
+    with get_db_connection() as conn:
+        conn.execute(
+            """
+            UPDATE users
+            SET salt = ?, password_hash = ?, password_reset_at = ?, token_version = token_version + 1
+            WHERE username = ?
+            """,
+            (salt, password_hash, datetime.now(timezone.utc).isoformat(), target_username),
+        )
+        conn.commit()
+    append_audit_log("password_reset", actor="admin", target=target_username)
     return True, f"Password user {target_username} berhasil di-reset."
 
 
 
-def bulk_register_users_from_dataframe(df: pd.DataFrame, actor: str = "system") -> Tuple[bool, str, List[Dict[str, str]]]:
+def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, List[Dict[str, str]]]:
     required_columns = {"username", "password"}
     normalized_columns = {str(col).strip().lower(): col for col in df.columns}
     if not required_columns.issubset(set(normalized_columns.keys())):
@@ -428,7 +538,7 @@ def bulk_register_users_from_dataframe(df: pd.DataFrame, actor: str = "system") 
         if not username and not password:
             continue
 
-        ok, message = register_user(username, password, actor=actor)
+        ok, message = register_user(username, password)
         results.append({
             "row": str(idx + 2),
             "username": username,
@@ -442,75 +552,78 @@ def bulk_register_users_from_dataframe(df: pd.DataFrame, actor: str = "system") 
     success_count = sum(1 for item in results if item["status"] == "OK")
     fail_count = len(results) - success_count
     summary = f"Import selesai. Berhasil: {success_count}, Gagal: {fail_count}."
-    append_audit_log("bulk_user_import", actor=actor, status="ok", details={"success": success_count, "failed": fail_count})
     return True, summary, results
-
-
-def maybe_upgrade_password_hash(username: str, user: Dict[str, Any], password: str):
-    if not password_needs_rehash(user):
-        return
-    users = load_users()
-    latest = users.get(username)
-    if not latest:
-        return
-    salt, password_hash = hash_password(password)
-    latest["salt"] = salt
-    latest["password_hash"] = password_hash
-    latest["password_algo"] = PASSWORD_HASH_SCHEME
-    latest["password_reset_at"] = utc_now().isoformat()
-    latest["token_version"] = int(latest.get("token_version", 0)) + 1
-    save_users(users)
-    append_audit_log("password_hash_upgraded", actor=username, target=username)
 
 
 def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
     username = s_clean(username)
-    lock_message = get_login_lock_message(username)
-    if lock_message:
+    locked, lock_message = is_login_locked(username)
+    if locked:
         append_audit_log("login_blocked", actor=username, target=username, status="blocked")
         return False, lock_message, None
 
-    users = load_users()
-    user = users.get(username)
+    user = get_user_record(username)
     if not user:
-        register_failed_login(username)
-        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "username_not_found"})
-        return False, "Username atau password salah.", None
+        record_failed_login(username)
+        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "user_not_found"})
+        return False, "Username tidak ditemukan.", None
     if not verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
-        register_failed_login(username)
-        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "invalid_password"})
-        return False, "Username atau password salah.", None
+        record_failed_login(username)
+        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "bad_password"})
+        return False, "Password salah.", None
 
-    clear_failed_login(username)
-    maybe_upgrade_password_hash(username, user, password)
-    latest_user = load_users().get(username, user)
+    clear_login_attempts(username)
     append_audit_log("login_success", actor=username, target=username)
     return True, "Login berhasil.", {
         "username": username,
-        "role": latest_user.get("role", "user"),
-        "token_version": int(latest_user.get("token_version", 1)),
+        "role": user.get("role", "user"),
+        "token_version": int(user.get("token_version", 1)),
     }
 
 
 def issue_token(user: Dict[str, Any]) -> str:
-    now = utc_now()
+    now = datetime.now(timezone.utc)
     payload = {
         "sub": user["username"],
         "role": user.get("role", "user"),
         "token_version": int(user.get("token_version", 1)),
-        "jti": secrets.token_urlsafe(16),
         "iat": now.timestamp(),
         "exp": (now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp(),
     }
     return create_jwt(payload)
 
 
-def logout(reason: str = "logout"):
-    user = st.session_state.get("auth_user") or {}
-    if user:
-        append_audit_log("logout", actor=user.get("username", "unknown"), target=user.get("username", "unknown"), details={"reason": reason})
+def release_memory():
+    gc.collect()
+
+
+def clear_cached_results(except_key: Optional[str] = None):
+    for key in list(st.session_state.download_cache.keys()):
+        if except_key and key == except_key:
+            continue
+        st.session_state.download_cache.pop(key, None)
+    for key in list(st.session_state.summary_cache.keys()):
+        if except_key and key == except_key:
+            continue
+        st.session_state.summary_cache.pop(key, None)
+    release_memory()
+
+
+def begin_job(job_key: str, label: str):
+    current_key = st.session_state.get("active_job_key", "")
+    if current_key and current_key != job_key:
+        clear_cached_results()
+    st.session_state.active_job_key = job_key
+    st.session_state.active_job_label = label
+    release_memory()
+
+
+def logout():
     st.session_state.auth_token = ""
     st.session_state.auth_user = None
+    st.session_state.active_job_key = ""
+    st.session_state.active_job_label = ""
+    clear_cached_results()
 
 
 def get_current_user() -> Optional[Dict[str, Any]]:
@@ -519,82 +632,23 @@ def get_current_user() -> Optional[Dict[str, Any]]:
         return None
     try:
         payload = decode_jwt(token)
-        username = s_clean(payload.get("sub", ""))
-        users = load_users()
-        user = users.get(username)
+        user = get_user_record(payload.get("sub", ""))
         if not user:
             raise ValueError("User tidak ditemukan")
-        token_version = int(payload.get("token_version", 0))
-        current_version = int(user.get("token_version", 1))
-        if token_version != current_version:
-            raise ValueError("Versi token sudah tidak valid")
-        return {"username": username, "role": user.get("role", "user"), "token_version": current_version}
+        if int(payload.get("token_version", 0)) != int(user.get("token_version", 0)):
+            raise ValueError("Token tidak lagi valid")
+        return {
+            "username": user.get("username", ""),
+            "role": user.get("role", "user"),
+            "token_version": int(user.get("token_version", 1)),
+        }
     except Exception:
-        logout(reason="token_invalid")
+        logout()
         return None
-
-
-def validate_uploaded_xlsx(file_obj: Any, label: str = "file") -> Optional[str]:
-    if file_obj is None:
-        return None
-    name = getattr(file_obj, "name", label) or label
-    if not name.lower().endswith(".xlsx"):
-        return f"{label}: hanya file .xlsx yang diizinkan."
-    try:
-        raw = file_obj.getvalue()
-    except Exception:
-        return f"{label}: file tidak bisa dibaca."
-    size_mb = len(raw) / (1024 * 1024)
-    if size_mb > MAX_SINGLE_UPLOAD_MB:
-        return f"{label}: ukuran file {size_mb:.1f} MB melebihi batas {MAX_SINGLE_UPLOAD_MB} MB per file."
-    try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
-            infos = zf.infolist()
-            if len(infos) > MAX_XLSX_ENTRIES:
-                return f"{label}: struktur file terlalu kompleks / mencurigakan."
-            total_uncompressed = sum(int(info.file_size) for info in infos)
-            total_uncompressed_mb = total_uncompressed / (1024 * 1024)
-            if total_uncompressed_mb > MAX_XLSX_UNCOMPRESSED_MB:
-                return f"{label}: ukuran konten terdekompresi terlalu besar ({total_uncompressed_mb:.1f} MB)."
-            required_prefixes = ("xl/", "_rels/", "docProps/", "[Content_Types].xml")
-            names = [info.filename for info in infos]
-            if not any(n == "[Content_Types].xml" for n in names):
-                return f"{label}: file XLSX tidak valid."
-            if not any(n.startswith("xl/") for n in names):
-                return f"{label}: file XLSX tidak valid."
-            for info in infos:
-                fname = info.filename
-                if fname.startswith("/") or ".." in fname.replace("\\", "/"):
-                    return f"{label}: nama entry XLSX tidak valid."
-                if info.compress_size > 0 and (info.file_size / info.compress_size) > 150:
-                    return f"{label}: rasio kompresi file terlalu tinggi / mencurigakan."
-    except zipfile.BadZipFile:
-        return f"{label}: file XLSX tidak valid atau rusak."
-    except Exception as exc:
-        return f"{label}: validasi file gagal ({exc})."
-    return None
-
-
-def validate_file_batch(file_map: Dict[str, Any]) -> Optional[str]:
-    for label, obj in file_map.items():
-        if isinstance(obj, list):
-            for idx, item in enumerate(obj, start=1):
-                err = validate_uploaded_xlsx(item, f"{label} #{idx}")
-                if err:
-                    return err
-        else:
-            err = validate_uploaded_xlsx(obj, label)
-            if err:
-                return err
-    return None
 
 
 def render_login_page() -> Optional[Dict[str, Any]]:
-    if not ensure_security_bootstrap():
-        return None
-
     st.title(f"{APP_TITLE} - Login")
-    st.caption("Keamanan login sudah diperketat: password kuat, lockout saat brute-force, dan token akan invalid setelah reset password.")
 
     with st.form("login_form"):
         username = st.text_input("Username", key="login_username")
@@ -627,8 +681,6 @@ def render_user_management(current_user: Dict[str, Any]):
             "role": info.get("role", "user"),
             "created_at": info.get("created_at", ""),
             "password_reset_at": info.get("password_reset_at", ""),
-            "token_version": info.get("token_version", 1),
-            "password_algo": info.get("password_algo", "legacy"),
         })
 
     st.subheader("Daftar User")
@@ -651,7 +703,7 @@ def render_user_management(current_user: Dict[str, Any]):
                 if new_password != confirm_password:
                     st.error("Konfirmasi password tidak sama.")
                 else:
-                    ok, message = register_user(new_username, new_password, actor=current_user.get("username", "admin"))
+                    ok, message = register_user(new_username, new_password)
                     if ok:
                         st.success(message)
                         st.rerun()
@@ -661,8 +713,8 @@ def render_user_management(current_user: Dict[str, Any]):
     with tab_bulk:
         st.write("Upload file Excel (.xlsx) dengan kolom wajib: username, password")
         sample_df = pd.DataFrame([
-            {"username": "andi", "password": "Andi#2026Aman"},
-            {"username": "budi", "password": "Budi#2026Aman"},
+            {"username": "andi", "password": "andi1234"},
+            {"username": "budi", "password": "budi1234"},
         ])
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -681,23 +733,19 @@ def render_user_management(current_user: Dict[str, Any]):
             help="Kolom wajib: username, password",
         )
         if bulk_file is not None:
-            validation_error = validate_uploaded_xlsx(bulk_file, "File import user")
-            if validation_error:
-                st.error(validation_error)
-            else:
-                try:
-                    df = pd.read_excel(io.BytesIO(bulk_file.getvalue()))
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                    if st.button("Proses Import User", key="process_bulk_user_import"):
-                        ok, summary, results = bulk_register_users_from_dataframe(df, actor=current_user.get("username", "admin"))
-                        if ok:
-                            st.success(summary)
-                            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
-                            st.rerun()
-                        else:
-                            st.error(summary)
-                except Exception as e:
-                    st.error(f"Gagal membaca file Excel: {e}")
+            try:
+                df = pd.read_excel(bulk_file)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                if st.button("Proses Import User", key="process_bulk_user_import"):
+                    ok, summary, results = bulk_register_users_from_dataframe(df)
+                    if ok:
+                        st.success(summary)
+                        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+                        st.rerun()
+                    else:
+                        st.error(summary)
+            except Exception as e:
+                st.error(f"Gagal membaca file Excel: {e}")
 
     with tab_reset:
         target_options = [u for u in users.keys()]
@@ -710,7 +758,7 @@ def render_user_management(current_user: Dict[str, Any]):
                 if new_password != confirm_password:
                     st.error("Konfirmasi password tidak sama.")
                 else:
-                    ok, message = reset_user_password(target_username, new_password, actor=current_user.get("username", "admin"))
+                    ok, message = reset_user_password(target_username, new_password)
                     if ok:
                         st.success(message)
                         st.rerun()
@@ -739,12 +787,14 @@ def render_user_management(current_user: Dict[str, Any]):
 
 
 def require_authentication() -> Optional[Dict[str, Any]]:
-    if not ensure_security_bootstrap():
-        return None
+    if not JWT_SECRET:
+        st.error("APP_JWT_SECRET belum di-set. Set environment variable ini sebelum app dipakai publik.")
+        st.stop()
     user = get_current_user()
     if user:
         return user
     return render_login_page()
+
 
 # ============================================================
 # GENERIC HELPERS
@@ -1133,6 +1183,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
     return sku_map, sorted(areas)
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
     for sname in wb.sheetnames:
@@ -1147,8 +1198,11 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
         merged_lookup.update(sku_map)
         areas_all |= set(areas)
     if not merged_lookup:
+        wb.close()
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
-    return merged_lookup, sorted(areas_all)
+    out = (merged_lookup, sorted(areas_all))
+    wb.close()
+    return out
 
 
 def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]) -> Optional[int]:
@@ -1253,9 +1307,6 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
 
 
 def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file})
-    if validation_error:
-        raise ValueError(validation_error)
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -1356,9 +1407,6 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
 
 
 def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file})
-    if validation_error:
-        raise ValueError(validation_error)
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -1384,8 +1432,9 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: s
 # ============================================================
 # PRICE LOADERS
 # ============================================================
+@st.cache_data(show_spinner=False, ttl=600)
 def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
-    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True)
+    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True, read_only=True)
     ws = wb.active
     code_candidates = ["addon_code", "ADDON_CODE", "Addon Code", "Kode", "KODE", "KODE ADDON", "KODE_ADDON", "Standarisasi Kode SKU di Varian"]
     price_candidates = ["harga", "HARGA", "Price", "PRICE", "Harga"]
@@ -1411,6 +1460,7 @@ def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
         if price_raw is None:
             continue
         addon_map[code] = int(apply_multiplier_if_needed(price_raw))
+    wb.close()
     return addon_map
 
 
@@ -1439,8 +1489,9 @@ def find_header_row_and_cols_pricelist_fixed(ws: Worksheet, required_price_cols:
     )
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[str, Dict[str, int]]:
-    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=True)
     ws = get_change_sheet(wb)
     header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
     result: Dict[str, Dict[str, int]] = {}
@@ -1453,9 +1504,11 @@ def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[st
             raw = parse_price_cell(ws.cell(row=r, column=col).value)
             if raw is not None:
                 result[sku][label] = int(apply_multiplier_if_needed(raw))
+    wb.close()
     return result
 
 
+@st.cache_data(show_spinner=False, ttl=600)
 def load_pricelist_price_map_multisheet(
     pl_bytes: bytes,
     needed_cols: List[str],
@@ -1530,17 +1583,17 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # PRICE PROCESSORS
 # ============================================================
 def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
 
         if mode == "normal":
@@ -1596,14 +1649,12 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start_fixed - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, data_start_fixed, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
 
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1611,23 +1662,25 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
 def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update TikTokShop tidak sesuai."})
+            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1649,13 +1702,11 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, 6, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_harga_normal_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1663,23 +1714,25 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
     return zip_named_files(output_files), "hasil_harga_normal_tiktokshop.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
 def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    pricelist_bytes = pricelist_file.getvalue()
+    addon_bytes = addon_file.getvalue()
+    price_map = load_pricelist_price_map(pricelist_bytes, ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_bytes)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
 
     for mf in mass_files:
-        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        mf_bytes = mf.getvalue()
+        wb = load_workbook(io.BytesIO(mf_bytes))
         ws = wb.active
         sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
         price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
         if sku_col is None or price_col is None:
             issues.append({"file": mf.name, "reason": "Header mass update PowerMerchant tidak sesuai."})
+            wb.close()
             continue
 
         changed_rows: List[int] = []
@@ -1701,13 +1754,11 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            batch_delete_unkept_rows(ws, 6, set(changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
+        wb.close()
 
     summary["issues_count"] = len(issues)
     if len(output_files) == 1:
@@ -1715,10 +1766,8 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
 def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
-    validation_error = validate_file_batch({"Input TikTokShop": input_file, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
@@ -1769,9 +1818,6 @@ def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_f
 
 
 def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1888,9 +1934,6 @@ def process_submit_campaign_tiktokshop(
     discount_rp: int,
     price_key: str,
 ):
-    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
-    if validation_error:
-        raise ValueError(validation_error)
     price_map = load_pricelist_price_map_multisheet(
         pricelist_file.getvalue(),
         ["M3", "M4"],
@@ -2016,14 +2059,77 @@ def page_header(title: str, desc: str, requirements: List[str]):
             st.write(f"- {item}")
 
 
-def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
+def uploaded_file_size_mb(file_obj: Any) -> float:
+    return len(file_obj.getvalue()) / (1024 * 1024)
+
+
+def validate_uploaded_xlsx(file_obj: Any, max_file_mb: int) -> Optional[str]:
+    if file_obj is None:
+        return None
+    name = getattr(file_obj, "name", "input") or "input"
+    if not name.lower().endswith(".xlsx"):
+        return f"File {name} harus berformat .xlsx."
+    raw = file_obj.getvalue()
+    size_mb = len(raw) / (1024 * 1024)
+    if size_mb > max_file_mb:
+        return f"File {name} melebihi {max_file_mb} MB."
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_XLSX_ENTRIES:
+                return f"File {name} terlalu kompleks."
+            total_uncompressed = sum(int(info.file_size) for info in infos)
+            if total_uncompressed > MAX_XLSX_UNCOMPRESSED_MB * 1024 * 1024:
+                return f"File {name} terlalu besar saat diekstrak."
+            if not any(info.filename == "[Content_Types].xml" for info in infos):
+                return f"File {name} bukan XLSX yang valid."
+            if not any(info.filename.startswith("xl/") for info in infos):
+                return f"File {name} bukan XLSX yang valid."
+            for info in infos:
+                normalized = info.filename.replace("\\", "/")
+                if info.is_dir():
+                    continue
+                if normalized.startswith("/") or ".." in normalized.split("/"):
+                    return f"File {name} tidak valid."
+                if info.compress_size > 0 and info.file_size / max(info.compress_size, 1) > 150:
+                    return f"File {name} terindikasi zip bomb / tidak aman."
+    except zipfile.BadZipFile:
+        return f"File {name} bukan XLSX yang valid."
+    return None
+
+
+def validate_mass_uploads(mass_files: List[Any], profile: str = "generic") -> Optional[str]:
     if not mass_files:
         return "Upload file mass update minimal 1 file."
-    if len(mass_files) > MAX_MASS_FILES:
-        return f"Maksimal {MAX_MASS_FILES} file per proses."
+
+    profiles = {
+        "shopee": (MAX_SHOPEE_FILES, MAX_SHOPEE_FILE_MB),
+        "tiktok": (MAX_TIKTOK_FILES, MAX_TIKTOK_FILE_MB),
+        "bigseller": (MAX_BIGSELLER_FILES, MAX_BIGSELLER_FILE_MB),
+        "generic": (MAX_MASS_FILES, MAX_GENERIC_INPUT_FILE_MB),
+    }
+    max_files, max_file_mb = profiles.get(profile, profiles["generic"])
+
+    if len(mass_files) > max_files:
+        return f"Maksimal {max_files} file per proses."
     if total_upload_size_mb(mass_files) > MAX_TOTAL_UPLOAD_MB:
         return f"Total upload melebihi {MAX_TOTAL_UPLOAD_MB} MB."
-    return validate_file_batch({"Mass Update": mass_files})
+
+    for f in mass_files:
+        err = validate_uploaded_xlsx(f, max_file_mb)
+        if err:
+            return err
+    return None
+
+
+def validate_single_upload(file_obj: Any, profile: str) -> Optional[str]:
+    limits = {
+        "pricelist": MAX_PRICELIST_FILE_MB,
+        "addon": MAX_ADDON_FILE_MB,
+        "generic": MAX_GENERIC_INPUT_FILE_MB,
+        "tiktok": MAX_TIKTOK_FILE_MB,
+    }
+    return validate_uploaded_xlsx(file_obj, limits.get(profile, MAX_GENERIC_INPUT_FILE_MB))
 
 
 # ============================================================
@@ -2080,9 +2186,14 @@ def render_update_stok_shopee():
     process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
 
     if st.button("Proses", key="btn_stock_shopee", disabled=process_disabled):
-        err = validate_mass_uploads(mass_files)
+        begin_job("stock_shopee", "Update Stok Shopee")
+        err = validate_mass_uploads(mass_files, "shopee")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        if pl_err:
+            st.error(pl_err)
             return
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
@@ -2129,9 +2240,14 @@ def render_update_stok_tiktokshop():
     process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
 
     if st.button("Proses", key="btn_stock_tiktokshop", disabled=process_disabled):
-        err = validate_mass_uploads(mass_files)
+        begin_job("stock_tiktokshop", "Update Stok TikTokShop")
+        err = validate_mass_uploads(mass_files, "tiktok")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        if pl_err:
+            st.error(pl_err)
             return
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
@@ -2162,9 +2278,15 @@ def render_harga_normal_shopee():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_shopee_disc")
 
     if st.button("Proses", key="btn_normal_shopee"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("normal_shopee", "Harga Normal Shopee")
+        err = validate_mass_uploads(mass_files, "shopee")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2197,9 +2319,15 @@ def render_harga_coret_shopee():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_shopee_disc")
 
     if st.button("Proses", key="btn_coret_shopee"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("coret_shopee", "Harga Coret Shopee")
+        err = validate_mass_uploads(mass_files, "shopee")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2232,9 +2360,15 @@ def render_harga_normal_tiktokshop():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_tiktokshop_disc")
 
     if st.button("Proses", key="btn_normal_tiktokshop"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("normal_tiktokshop", "Harga Normal TikTokShop")
+        err = validate_mass_uploads(mass_files, "tiktok")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2267,6 +2401,13 @@ def render_harga_coret_tiktokshop():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_tiktokshop_disc")
 
     if st.button("Proses", key="btn_coret_tiktokshop"):
+        begin_job("coret_tiktokshop", "Harga Coret TikTokShop")
+        input_err = validate_single_upload(input_file, "tiktok")
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if input_err or pl_err or add_err:
+            st.error(input_err or pl_err or add_err)
+            return
         if not input_file or not pricelist_file or not addon_file:
             st.error("Upload semua file yang dibutuhkan dulu.")
             return
@@ -2298,9 +2439,15 @@ def render_harga_normal_powemerchant():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_pm_disc")
 
     if st.button("Proses", key="btn_normal_pm"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("normal_pm", "Harga Normal PowerMerchant")
+        err = validate_mass_uploads(mass_files, "generic")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2333,9 +2480,15 @@ def render_harga_coret_powemerchant():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="coret_pm_disc")
 
     if st.button("Proses", key="btn_coret_pm"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("coret_pm", "Harga Coret PowerMerchant")
+        err = validate_mass_uploads(mass_files, "generic")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2368,9 +2521,15 @@ def render_harga_normal_bigseller():
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_bigseller_disc")
 
     if st.button("Proses", key="btn_normal_bigseller"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("normal_bigseller", "Harga Normal Bigseller")
+        err = validate_mass_uploads(mass_files, "bigseller")
         if err:
             st.error(err)
+            return
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
@@ -2444,9 +2603,16 @@ def render_submit_campaign_tiktokshop():
     )
 
     if st.button("Proses", key="btn_submit_campaign_tiktokshop"):
-        err = validate_mass_uploads(mass_files)
+        begin_job("submit_campaign_tiktokshop", "Submit Campaign TikTokShop")
+        err = validate_mass_uploads(mass_files, "tiktok")
         if err:
             st.error(err)
+            return
+
+        pl_err = validate_single_upload(pricelist_file, "pricelist")
+        add_err = validate_single_upload(addon_file, "addon")
+        if pl_err or add_err:
+            st.error(pl_err or add_err)
             return
 
         if not pricelist_file or not addon_file:
@@ -2481,6 +2647,9 @@ def render_submit_campaign_tiktokshop():
 def build_menu(user: Dict[str, Any]) -> str:
     st.sidebar.title(APP_TITLE)
     st.sidebar.success(f"Login sebagai: {user['username']} ({user.get('role', 'user')})")
+    active_job_label = st.session_state.get("active_job_label", "")
+    if active_job_label:
+        st.sidebar.info(f"Proses aktif terakhir: {active_job_label}")
     if st.sidebar.button("Logout", use_container_width=True):
         logout()
         st.rerun()
