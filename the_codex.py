@@ -23,7 +23,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "The Codex Final"
+APP_TITLE = "Codex.id"
 MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "30"))
 MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "40"))
 MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "20"))
