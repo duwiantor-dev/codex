@@ -137,12 +137,28 @@ def save_users(users: Dict[str, Dict[str, Any]]):
         json.dump(users, f, indent=2)
 
 
-def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
-    username = s_clean(username)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,30}", username):
-        return False, "Username harus 3-30 karakter dan hanya boleh huruf, angka, titik, underscore, atau minus."
+def validate_username(username: str) -> Tuple[bool, str, str]:
+    cleaned = s_clean(username)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{3,30}", cleaned):
+        return False, "Username harus 3-30 karakter dan hanya boleh huruf, angka, titik, underscore, atau minus.", cleaned
+    return True, "", cleaned
+
+
+
+def validate_password(password: str) -> Tuple[bool, str]:
     if len(password) < 6:
         return False, "Password minimal 6 karakter."
+    return True, ""
+
+
+
+def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
+    ok, message, username = validate_username(username)
+    if not ok:
+        return False, message
+    ok, message = validate_password(password)
+    if not ok:
+        return False, message
 
     users = load_users()
     if username in users:
@@ -156,7 +172,77 @@ def register_user(username: str, password: str, role: str = "user") -> Tuple[boo
         "created_at": datetime.now(timezone.utc).isoformat(),
     }
     save_users(users)
-    return True, "Registrasi berhasil. Silakan login."
+    return True, f"User {username} berhasil ditambahkan."
+
+
+
+def delete_user(target_username: str, current_username: str) -> Tuple[bool, str]:
+    users = load_users()
+    target_username = s_clean(target_username)
+    current_username = s_clean(current_username)
+
+    if target_username not in users:
+        return False, "User tidak ditemukan."
+    if target_username == current_username:
+        return False, "Admin yang sedang login tidak bisa menghapus akun sendiri."
+
+    del users[target_username]
+    save_users(users)
+    return True, f"User {target_username} berhasil dihapus."
+
+
+
+def reset_user_password(target_username: str, new_password: str) -> Tuple[bool, str]:
+    users = load_users()
+    target_username = s_clean(target_username)
+    if target_username not in users:
+        return False, "User tidak ditemukan."
+
+    ok, message = validate_password(new_password)
+    if not ok:
+        return False, message
+
+    salt, password_hash = hash_password(new_password)
+    users[target_username]["salt"] = salt
+    users[target_username]["password_hash"] = password_hash
+    users[target_username]["password_reset_at"] = datetime.now(timezone.utc).isoformat()
+    save_users(users)
+    return True, f"Password user {target_username} berhasil di-reset."
+
+
+
+def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, List[Dict[str, str]]]:
+    required_columns = {"username", "password"}
+    normalized_columns = {str(col).strip().lower(): col for col in df.columns}
+    if not required_columns.issubset(set(normalized_columns.keys())):
+        return False, "File harus memiliki kolom: username dan password.", []
+
+    username_col = normalized_columns["username"]
+    password_col = normalized_columns["password"]
+    results: List[Dict[str, str]] = []
+
+    for idx, row in df.iterrows():
+        username = s_clean(row.get(username_col))
+        password = "" if pd.isna(row.get(password_col)) else str(row.get(password_col)).strip()
+
+        if not username and not password:
+            continue
+
+        ok, message = register_user(username, password)
+        results.append({
+            "row": str(idx + 2),
+            "username": username,
+            "status": "OK" if ok else "GAGAL",
+            "message": message,
+        })
+
+    if not results:
+        return False, "Tidak ada data user yang terbaca di file.", []
+
+    success_count = sum(1 for item in results if item["status"] == "OK")
+    fail_count = len(results) - success_count
+    summary = f"Import selesai. Berhasil: {success_count}, Gagal: {fail_count}."
+    return True, summary, results
 
 
 def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
@@ -199,30 +285,61 @@ def get_current_user() -> Optional[Dict[str, Any]]:
 
 def render_login_page() -> Optional[Dict[str, Any]]:
     st.title(f"{APP_TITLE} - Login")
+    st.caption("Authentication lokal menggunakan JWT tanpa database. User disimpan di file JSON lokal.")
+    st.info(
+        f"User default pertama kali: {DEFAULT_ADMIN_USERNAME} / {DEFAULT_ADMIN_PASSWORD}. "
+        "Fitur register umum dimatikan. Penambahan user hanya bisa dilakukan oleh admin."
+    )
 
-    tab_login, tab_register = st.tabs(["Login", "Register"])
+    with st.form("login_form"):
+        username = st.text_input("Username", key="login_username")
+        password = st.text_input("Password", type="password", key="login_password")
+        submitted = st.form_submit_button("Login")
+        if submitted:
+            ok, message, user = authenticate_user(username, password)
+            if ok and user is not None:
+                st.session_state.auth_token = issue_token(user)
+                st.session_state.auth_user = user
+                st.success(message)
+                st.rerun()
+            else:
+                st.error(message)
+    return None
 
-    with tab_login:
-        with st.form("login_form"):
-            username = st.text_input("Username", key="login_username")
-            password = st.text_input("Password", type="password", key="login_password")
-            submitted = st.form_submit_button("Login")
-            if submitted:
-                ok, message, user = authenticate_user(username, password)
-                if ok and user is not None:
-                    st.session_state.auth_token = issue_token(user)
-                    st.session_state.auth_user = user
-                    st.success(message)
-                    st.rerun()
-                else:
-                    st.error(message)
 
-    with tab_register:
-        with st.form("register_form"):
-            new_username = st.text_input("Username baru", key="register_username")
-            new_password = st.text_input("Password baru", type="password", key="register_password")
-            confirm_password = st.text_input("Konfirmasi password", type="password", key="register_password_confirm")
-            submitted = st.form_submit_button("Register")
+
+def render_user_management(current_user: Dict[str, Any]):
+    st.title("Kelola User")
+    if current_user.get("role") != "admin":
+        st.error("Halaman ini hanya untuk admin.")
+        return
+
+    users = load_users()
+    user_rows = []
+    for username, info in sorted(users.items()):
+        user_rows.append({
+            "username": username,
+            "role": info.get("role", "user"),
+            "created_at": info.get("created_at", ""),
+            "password_reset_at": info.get("password_reset_at", ""),
+        })
+
+    st.subheader("Daftar User")
+    st.dataframe(pd.DataFrame(user_rows), use_container_width=True, hide_index=True)
+
+    tab_add, tab_bulk, tab_reset, tab_delete = st.tabs([
+        "Tambah User",
+        "Tambah User Massal",
+        "Reset Password",
+        "Hapus User",
+    ])
+
+    with tab_add:
+        with st.form("admin_add_user_form"):
+            new_username = st.text_input("Username baru")
+            new_password = st.text_input("Password baru", type="password")
+            confirm_password = st.text_input("Konfirmasi password", type="password")
+            submitted = st.form_submit_button("Tambah User")
             if submitted:
                 if new_password != confirm_password:
                     st.error("Konfirmasi password tidak sama.")
@@ -230,9 +347,84 @@ def render_login_page() -> Optional[Dict[str, Any]]:
                     ok, message = register_user(new_username, new_password)
                     if ok:
                         st.success(message)
+                        st.rerun()
                     else:
                         st.error(message)
-    return None
+
+    with tab_bulk:
+        st.write("Upload file Excel (.xlsx) dengan kolom wajib: username, password")
+        sample_df = pd.DataFrame([
+            {"username": "andi", "password": "andi1234"},
+            {"username": "budi", "password": "budi1234"},
+        ])
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine="openpyxl") as writer:
+            sample_df.to_excel(writer, index=False, sheet_name="users")
+        st.download_button(
+            "Download Template Excel",
+            data=output.getvalue(),
+            file_name="template_import_user.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+        bulk_file = st.file_uploader(
+            "Upload Excel user",
+            type=["xlsx"],
+            key="bulk_user_upload",
+            help="Kolom wajib: username, password",
+        )
+        if bulk_file is not None:
+            try:
+                df = pd.read_excel(bulk_file)
+                st.dataframe(df, use_container_width=True, hide_index=True)
+                if st.button("Proses Import User", key="process_bulk_user_import"):
+                    ok, summary, results = bulk_register_users_from_dataframe(df)
+                    if ok:
+                        st.success(summary)
+                        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+                        st.rerun()
+                    else:
+                        st.error(summary)
+            except Exception as e:
+                st.error(f"Gagal membaca file Excel: {e}")
+
+    with tab_reset:
+        target_options = [u for u in users.keys()]
+        with st.form("admin_reset_password_form"):
+            target_username = st.selectbox("Pilih user", target_options, key="reset_target_username")
+            new_password = st.text_input("Password baru", type="password", key="reset_new_password")
+            confirm_password = st.text_input("Konfirmasi password", type="password", key="reset_confirm_password")
+            submitted = st.form_submit_button("Reset Password")
+            if submitted:
+                if new_password != confirm_password:
+                    st.error("Konfirmasi password tidak sama.")
+                else:
+                    ok, message = reset_user_password(target_username, new_password)
+                    if ok:
+                        st.success(message)
+                        st.rerun()
+                    else:
+                        st.error(message)
+
+    with tab_delete:
+        deletable_users = [u for u in users.keys() if u != current_user.get("username")]
+        if not deletable_users:
+            st.warning("Tidak ada user lain yang bisa dihapus.")
+        else:
+            with st.form("admin_delete_user_form"):
+                target_username = st.selectbox("Pilih user yang akan dihapus", deletable_users, key="delete_target_username")
+                confirmation = st.text_input("Ketik HAPUS untuk konfirmasi")
+                submitted = st.form_submit_button("Hapus User")
+                if submitted:
+                    if confirmation != "HAPUS":
+                        st.error("Konfirmasi tidak valid. Ketik HAPUS untuk melanjutkan.")
+                    else:
+                        ok, message = delete_user(target_username, current_user.get("username", ""))
+                        if ok:
+                            st.success(message)
+                            st.rerun()
+                        else:
+                            st.error(message)
 
 
 def require_authentication() -> Optional[Dict[str, Any]]:
@@ -1957,9 +2149,13 @@ def build_menu(user: Dict[str, Any]) -> str:
         st.rerun()
 
 
+    main_menu_options = ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"]
+    if user.get("role") == "admin":
+        main_menu_options.append("Kelola User")
+
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"],
+        main_menu_options,
         key="sidebar_main_menu",
     )
 
@@ -2013,6 +2209,9 @@ def build_menu(user: Dict[str, Any]) -> str:
         else:
             route = "submit_campaign_tiktokshop"
 
+    elif group == "Kelola User" and user.get("role") == "admin":
+        route = "user_management"
+
     else:
         route = "dashboard"
 
@@ -2057,6 +2256,8 @@ def main():
         render_submit_campaign_shopee()
     elif route == "submit_campaign_tiktokshop":
         render_submit_campaign_tiktokshop()
+    elif route == "user_management":
+        render_user_management(user)
     else:
         st.error("Menu tidak dikenal.")
 
