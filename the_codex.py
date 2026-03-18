@@ -6,7 +6,10 @@ import json
 import os
 import re
 import secrets
+import shutil
+import stat
 import zipfile
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -21,16 +24,29 @@ from openpyxl.worksheet.worksheet import Worksheet
 # APP CONFIG
 # ============================================================
 APP_TITLE = "The Codex"
-MAX_MASS_FILES = 50
-MAX_TOTAL_UPLOAD_MB = 200
+MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "50"))
+MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "200"))
+MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "25"))
+MAX_XLSX_ENTRIES = int(os.environ.get("APP_MAX_XLSX_ENTRIES", "20000"))
+MAX_XLSX_UNCOMPRESSED_MB = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "250"))
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
 
 AUTH_FILE = "users_local.json"
-JWT_SECRET = os.environ.get("APP_JWT_SECRET", "ganti-secret-ini-di-production")
+AUTH_SIG_FILE = "users_local.sig"
+LOGIN_ATTEMPT_FILE = "login_attempts.json"
+AUDIT_LOG_FILE = "security_audit.log"
+JWT_SECRET = os.environ.get("APP_JWT_SECRET", "").strip()
 JWT_ALGORITHM = "HS256"
-JWT_EXPIRE_HOURS = 8
-DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin")
-DEFAULT_ADMIN_PASSWORD = os.environ.get("APP_DEFAULT_PASSWORD", "admin123")
+JWT_EXPIRE_HOURS = int(os.environ.get("APP_JWT_EXPIRE_HOURS", "8"))
+STORAGE_HMAC_SECRET = (os.environ.get("APP_STORAGE_HMAC_SECRET", "").strip() or JWT_SECRET)
+PASSWORD_HASH_SCHEME = "pbkdf2_sha256"
+PASSWORD_HASH_ITERATIONS = int(os.environ.get("APP_PASSWORD_HASH_ITERATIONS", "310000"))
+DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
+BOOTSTRAP_ADMIN_PASSWORD = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "")
+FAILED_LOGIN_WINDOW_MINUTES = int(os.environ.get("APP_FAILED_LOGIN_WINDOW_MINUTES", "15"))
+FAILED_LOGIN_MAX_ATTEMPTS = int(os.environ.get("APP_FAILED_LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_LOCKOUT_MINUTES = int(os.environ.get("APP_LOGIN_LOCKOUT_MINUTES", "15"))
+UPLOAD_WARN_TOTAL_MB = int(os.environ.get("APP_UPLOAD_WARN_TOTAL_MB", "120"))
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -45,12 +61,11 @@ SESSION_DEFAULTS = {
     "stock_tiktokshop_areas_loaded": [],
     "auth_token": "",
     "auth_user": None,
+    "security_bootstrap_checked": False,
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
-
-
 
 
 # ============================================================
@@ -60,15 +75,206 @@ def get_auth_file_path() -> str:
     return os.path.join(os.path.dirname(__file__), AUTH_FILE)
 
 
+def get_auth_sig_file_path() -> str:
+    return os.path.join(os.path.dirname(__file__), AUTH_SIG_FILE)
+
+
+def get_login_attempt_file_path() -> str:
+    return os.path.join(os.path.dirname(__file__), LOGIN_ATTEMPT_FILE)
+
+
+def get_audit_log_path() -> str:
+    return os.path.join(os.path.dirname(__file__), AUDIT_LOG_FILE)
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def file_exists_and_nonempty(path: str) -> bool:
+    return os.path.exists(path) and os.path.getsize(path) > 0
+
+
+def ensure_private_file(path: str):
+    try:
+        os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        pass
+
+
+def atomic_write_json(path: str, payload: Any):
+    temp_path = f"{path}.tmp"
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+    os.replace(temp_path, path)
+    ensure_private_file(path)
+
+
+def get_auth_sig_file_path() -> str:
+    return os.path.join(os.path.dirname(__file__), AUTH_SIG_FILE)
+
+
+@contextmanager
+def locked_file(path: str):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    with open(path, "a+", encoding="utf-8") as lock_handle:
+        try:
+            import fcntl
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        except Exception:
+            pass
+        try:
+            yield
+        finally:
+            try:
+                import fcntl
+                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            except Exception:
+                pass
+
+
+def compute_hmac_signature(raw: bytes) -> str:
+    return hmac.new(STORAGE_HMAC_SECRET.encode("utf-8"), raw, hashlib.sha256).hexdigest()
+
+
+def write_signed_json(path: str, sig_path: str, payload: Any):
+    raw = json.dumps(payload, indent=2, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    backup_path = f"{path}.bak"
+    with locked_file(f"{path}.lock"):
+        if os.path.exists(path):
+            try:
+                shutil.copy2(path, backup_path)
+                ensure_private_file(backup_path)
+            except Exception:
+                pass
+        temp_path = f"{path}.tmp"
+        with open(temp_path, "wb") as f:
+            f.write(raw)
+        os.replace(temp_path, path)
+        ensure_private_file(path)
+
+        sig_temp_path = f"{sig_path}.tmp"
+        with open(sig_temp_path, "w", encoding="utf-8") as f:
+            f.write(compute_hmac_signature(raw))
+        os.replace(sig_temp_path, sig_path)
+        ensure_private_file(sig_path)
+
+
+def load_signed_json(path: str, sig_path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
+    try:
+        with locked_file(f"{path}.lock"):
+            with open(path, "rb") as f:
+                raw = f.read()
+            if not raw:
+                return default
+            if not os.path.exists(sig_path):
+                append_audit_log("auth_signature_missing", status="error", details={"path": os.path.basename(path)})
+                return default
+            with open(sig_path, "r", encoding="utf-8") as f:
+                expected = f.read().strip()
+            actual = compute_hmac_signature(raw)
+            if not expected or not hmac.compare_digest(actual, expected):
+                append_audit_log("auth_signature_invalid", status="error", details={"path": os.path.basename(path)})
+                return default
+            return json.loads(raw.decode("utf-8"))
+    except Exception:
+        append_audit_log("signed_json_load_failed", status="error", details={"path": os.path.basename(path)})
+        return default
+
+
+def append_audit_log(event: str, actor: str = "system", target: str = "", status: str = "ok", details: Optional[Dict[str, Any]] = None):
+    record = {
+        "ts": utc_now().isoformat(),
+        "event": event,
+        "actor": actor,
+        "target": target,
+        "status": status,
+        "details": details or {},
+    }
+    path = get_audit_log_path()
+    with open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    ensure_private_file(path)
+
+
+def load_json_file(path: str, default: Any) -> Any:
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data
+    except Exception:
+        append_audit_log("json_load_failed", status="error", details={"path": os.path.basename(path)})
+        return default
+
+
+def get_security_bootstrap_issues() -> List[str]:
+    issues: List[str] = []
+    auth_exists = file_exists_and_nonempty(get_auth_file_path())
+    if not JWT_SECRET or JWT_SECRET.lower() == "ganti-secret-ini-di-production":
+        issues.append("APP_JWT_SECRET wajib di-set dan tidak boleh pakai nilai default.")
+    if not auth_exists and not BOOTSTRAP_ADMIN_PASSWORD:
+        issues.append("APP_BOOTSTRAP_ADMIN_PASSWORD wajib di-set saat pertama kali bootstrap admin.")
+    return issues
+
+
+def ensure_security_bootstrap() -> bool:
+    issues = get_security_bootstrap_issues()
+    if not issues:
+        return True
+    st.error("Konfigurasi keamanan belum lengkap. App dihentikan sampai environment variable aman di-set.")
+    for item in issues:
+        st.write(f"- {item}")
+    st.code(
+        "APP_JWT_SECRET=<secret-random-panjang>\n"
+        "APP_BOOTSTRAP_ADMIN_PASSWORD=<password-admin-kuat>",
+        language="bash",
+    )
+    return False
+
+
 def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
     salt = salt or secrets.token_hex(16)
-    digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
-    return salt, digest
+    derived = hashlib.pbkdf2_hmac(
+        "sha256",
+        password.encode("utf-8"),
+        salt.encode("utf-8"),
+        PASSWORD_HASH_ITERATIONS,
+    )
+    encoded = base64.b64encode(derived).decode("utf-8")
+    return salt, f"{PASSWORD_HASH_SCHEME}${PASSWORD_HASH_ITERATIONS}${salt}${encoded}"
 
 
 def verify_password(password: str, salt: str, password_hash: str) -> bool:
-    _, digest = hash_password(password, salt)
+    if not password_hash:
+        return False
+
+    if password_hash.startswith(f"{PASSWORD_HASH_SCHEME}$"):
+        try:
+            _, iterations_s, saved_salt, encoded = password_hash.split("$", 3)
+            iterations = int(iterations_s)
+            derived = hashlib.pbkdf2_hmac(
+                "sha256",
+                password.encode("utf-8"),
+                saved_salt.encode("utf-8"),
+                iterations,
+            )
+            actual = base64.b64encode(derived).decode("utf-8")
+            return hmac.compare_digest(actual, encoded)
+        except Exception:
+            return False
+
+    legacy_salt = salt or ""
+    digest = hashlib.sha256(f"{legacy_salt}:{password}".encode("utf-8")).hexdigest()
     return hmac.compare_digest(digest, password_hash)
+
+
+def password_needs_rehash(user_record: Dict[str, Any]) -> bool:
+    stored = str(user_record.get("password_hash", ""))
+    return not stored.startswith(f"{PASSWORD_HASH_SCHEME}$")
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -106,35 +312,95 @@ def decode_jwt(token: str) -> Dict[str, Any]:
     exp = payload.get("exp")
     if exp is None:
         raise ValueError("Token tidak memiliki expiry")
-    if datetime.now(timezone.utc).timestamp() > float(exp):
+    if utc_now().timestamp() > float(exp):
         raise ValueError("Token sudah expired")
     return payload
 
 
+def bootstrap_admin_user() -> Dict[str, Dict[str, Any]]:
+    salt, password_hash = hash_password(BOOTSTRAP_ADMIN_PASSWORD)
+    default_users = {
+        DEFAULT_ADMIN_USERNAME: {
+            "salt": salt,
+            "password_hash": password_hash,
+            "role": "admin",
+            "created_at": utc_now().isoformat(),
+            "password_reset_at": utc_now().isoformat(),
+            "token_version": 1,
+            "password_algo": PASSWORD_HASH_SCHEME,
+        }
+    }
+    write_signed_json(get_auth_file_path(), get_auth_sig_file_path(), default_users)
+    append_audit_log("bootstrap_admin_created", target=DEFAULT_ADMIN_USERNAME)
+    return default_users
+
+
 def load_users() -> Dict[str, Dict[str, Any]]:
     path = get_auth_file_path()
+    sig_path = get_auth_sig_file_path()
     if not os.path.exists(path):
-        salt, password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
-        default_users = {
-            DEFAULT_ADMIN_USERNAME: {
-                "salt": salt,
-                "password_hash": password_hash,
-                "role": "admin",
-                "created_at": datetime.now(timezone.utc).isoformat(),
-            }
-        }
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(default_users, f, indent=2)
-        return default_users
-
-    with open(path, "r", encoding="utf-8") as f:
-        data = json.load(f)
+        return bootstrap_admin_user()
+    data = load_signed_json(path, sig_path, None)
+    if data is None:
+        raise RuntimeError("File user tidak valid atau terdeteksi berubah secara tidak sah. Pulihkan users_local.json dari backup terlebih dulu.")
     return data if isinstance(data, dict) else {}
 
 
 def save_users(users: Dict[str, Dict[str, Any]]):
-    with open(get_auth_file_path(), "w", encoding="utf-8") as f:
-        json.dump(users, f, indent=2)
+    write_signed_json(get_auth_file_path(), get_auth_sig_file_path(), users)
+
+
+def load_login_attempts() -> Dict[str, Dict[str, Any]]:
+    path = get_login_attempt_file_path()
+    data = load_json_file(path, {})
+    return data if isinstance(data, dict) else {}
+
+
+def save_login_attempts(payload: Dict[str, Dict[str, Any]]):
+    atomic_write_json(get_login_attempt_file_path(), payload)
+
+
+def cleanup_login_attempts(attempts: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    now_ts = utc_now().timestamp()
+    fresh: Dict[str, Dict[str, Any]] = {}
+    for username, info in attempts.items():
+        locked_until = float(info.get("locked_until", 0) or 0)
+        last_failed = float(info.get("last_failed_at", 0) or 0)
+        if locked_until > now_ts or (now_ts - last_failed) <= FAILED_LOGIN_WINDOW_MINUTES * 60:
+            fresh[username] = info
+    return fresh
+
+
+def get_login_lock_message(username: str) -> Optional[str]:
+    attempts = cleanup_login_attempts(load_login_attempts())
+    info = attempts.get(username, {})
+    locked_until = float(info.get("locked_until", 0) or 0)
+    now_ts = utc_now().timestamp()
+    if locked_until > now_ts:
+        remaining_min = max(1, int((locked_until - now_ts) // 60) + 1)
+        return f"Akun sementara dikunci karena terlalu banyak percobaan login gagal. Coba lagi sekitar {remaining_min} menit lagi."
+    return None
+
+
+def register_failed_login(username: str):
+    attempts = cleanup_login_attempts(load_login_attempts())
+    now_ts = utc_now().timestamp()
+    info = attempts.get(username, {"count": 0, "locked_until": 0, "last_failed_at": 0})
+    if now_ts - float(info.get("last_failed_at", 0) or 0) > FAILED_LOGIN_WINDOW_MINUTES * 60:
+        info["count"] = 0
+    info["count"] = int(info.get("count", 0)) + 1
+    info["last_failed_at"] = now_ts
+    if info["count"] >= FAILED_LOGIN_MAX_ATTEMPTS:
+        info["locked_until"] = now_ts + (LOGIN_LOCKOUT_MINUTES * 60)
+    attempts[username] = info
+    save_login_attempts(attempts)
+
+
+def clear_failed_login(username: str):
+    attempts = cleanup_login_attempts(load_login_attempts())
+    if username in attempts:
+        del attempts[username]
+        save_login_attempts(attempts)
 
 
 def validate_username(username: str) -> Tuple[bool, str, str]:
@@ -145,18 +411,18 @@ def validate_username(username: str) -> Tuple[bool, str, str]:
 
 
 
-def validate_password(password: str) -> Tuple[bool, str]:
+def validate_password(password: str, username: str = "") -> Tuple[bool, str]:
+    password = password or ""
     if len(password) < 6:
         return False, "Password minimal 6 karakter."
     return True, ""
 
 
-
-def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
+def register_user(username: str, password: str, role: str = "user", actor: str = "system") -> Tuple[bool, str]:
     ok, message, username = validate_username(username)
     if not ok:
         return False, message
-    ok, message = validate_password(password)
+    ok, message = validate_password(password, username=username)
     if not ok:
         return False, message
 
@@ -169,9 +435,13 @@ def register_user(username: str, password: str, role: str = "user") -> Tuple[boo
         "salt": salt,
         "password_hash": password_hash,
         "role": role,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": utc_now().isoformat(),
+        "password_reset_at": utc_now().isoformat(),
+        "token_version": 1,
+        "password_algo": PASSWORD_HASH_SCHEME,
     }
     save_users(users)
+    append_audit_log("user_created", actor=actor, target=username)
     return True, f"User {username} berhasil ditambahkan."
 
 
@@ -188,30 +458,35 @@ def delete_user(target_username: str, current_username: str) -> Tuple[bool, str]
 
     del users[target_username]
     save_users(users)
+    append_audit_log("user_deleted", actor=current_username, target=target_username)
     return True, f"User {target_username} berhasil dihapus."
 
 
 
-def reset_user_password(target_username: str, new_password: str) -> Tuple[bool, str]:
+def reset_user_password(target_username: str, new_password: str, actor: str = "system") -> Tuple[bool, str]:
     users = load_users()
     target_username = s_clean(target_username)
     if target_username not in users:
         return False, "User tidak ditemukan."
 
-    ok, message = validate_password(new_password)
+    ok, message = validate_password(new_password, username=target_username)
     if not ok:
         return False, message
 
     salt, password_hash = hash_password(new_password)
     users[target_username]["salt"] = salt
     users[target_username]["password_hash"] = password_hash
-    users[target_username]["password_reset_at"] = datetime.now(timezone.utc).isoformat()
+    users[target_username]["password_reset_at"] = utc_now().isoformat()
+    users[target_username]["password_algo"] = PASSWORD_HASH_SCHEME
+    users[target_username]["token_version"] = int(users[target_username].get("token_version", 0)) + 1
     save_users(users)
+    clear_failed_login(target_username)
+    append_audit_log("password_reset", actor=actor, target=target_username)
     return True, f"Password user {target_username} berhasil di-reset."
 
 
 
-def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, List[Dict[str, str]]]:
+def bulk_register_users_from_dataframe(df: pd.DataFrame, actor: str = "system") -> Tuple[bool, str, List[Dict[str, str]]]:
     required_columns = {"username", "password"}
     normalized_columns = {str(col).strip().lower(): col for col in df.columns}
     if not required_columns.issubset(set(normalized_columns.keys())):
@@ -228,7 +503,7 @@ def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, Lis
         if not username and not password:
             continue
 
-        ok, message = register_user(username, password)
+        ok, message = register_user(username, password, actor=actor)
         results.append({
             "row": str(idx + 2),
             "username": username,
@@ -242,31 +517,73 @@ def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, Lis
     success_count = sum(1 for item in results if item["status"] == "OK")
     fail_count = len(results) - success_count
     summary = f"Import selesai. Berhasil: {success_count}, Gagal: {fail_count}."
+    append_audit_log("bulk_user_import", actor=actor, status="ok", details={"success": success_count, "failed": fail_count})
     return True, summary, results
 
 
-def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+def maybe_upgrade_password_hash(username: str, user: Dict[str, Any], password: str):
+    if not password_needs_rehash(user):
+        return
     users = load_users()
-    user = users.get(s_clean(username))
+    latest = users.get(username)
+    if not latest:
+        return
+    salt, password_hash = hash_password(password)
+    latest["salt"] = salt
+    latest["password_hash"] = password_hash
+    latest["password_algo"] = PASSWORD_HASH_SCHEME
+    latest["password_reset_at"] = utc_now().isoformat()
+    latest["token_version"] = int(latest.get("token_version", 0)) + 1
+    save_users(users)
+    append_audit_log("password_hash_upgraded", actor=username, target=username)
+
+
+def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
+    username = s_clean(username)
+    lock_message = get_login_lock_message(username)
+    if lock_message:
+        append_audit_log("login_blocked", actor=username, target=username, status="blocked")
+        return False, lock_message, None
+
+    users = load_users()
+    user = users.get(username)
     if not user:
-        return False, "Username tidak ditemukan.", None
+        register_failed_login(username)
+        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "username_not_found"})
+        return False, "Username atau password salah.", None
     if not verify_password(password, user.get("salt", ""), user.get("password_hash", "")):
-        return False, "Password salah.", None
-    return True, "Login berhasil.", {"username": s_clean(username), "role": user.get("role", "user")}
+        register_failed_login(username)
+        append_audit_log("login_failed", actor=username, target=username, status="error", details={"reason": "invalid_password"})
+        return False, "Username atau password salah.", None
+
+    clear_failed_login(username)
+    maybe_upgrade_password_hash(username, user, password)
+    latest_user = load_users().get(username, user)
+    append_audit_log("login_success", actor=username, target=username)
+    return True, "Login berhasil.", {
+        "username": username,
+        "role": latest_user.get("role", "user"),
+        "token_version": int(latest_user.get("token_version", 1)),
+    }
 
 
 def issue_token(user: Dict[str, Any]) -> str:
-    now = datetime.now(timezone.utc)
+    now = utc_now()
     payload = {
         "sub": user["username"],
         "role": user.get("role", "user"),
+        "token_version": int(user.get("token_version", 1)),
+        "jti": secrets.token_urlsafe(16),
         "iat": now.timestamp(),
         "exp": (now + timedelta(hours=JWT_EXPIRE_HOURS)).timestamp(),
     }
     return create_jwt(payload)
 
 
-def logout():
+def logout(reason: str = "logout"):
+    user = st.session_state.get("auth_user") or {}
+    if user:
+        append_audit_log("logout", actor=user.get("username", "unknown"), target=user.get("username", "unknown"), details={"reason": reason})
     st.session_state.auth_token = ""
     st.session_state.auth_user = None
 
@@ -277,14 +594,82 @@ def get_current_user() -> Optional[Dict[str, Any]]:
         return None
     try:
         payload = decode_jwt(token)
-        return {"username": payload.get("sub", ""), "role": payload.get("role", "user")}
+        username = s_clean(payload.get("sub", ""))
+        users = load_users()
+        user = users.get(username)
+        if not user:
+            raise ValueError("User tidak ditemukan")
+        token_version = int(payload.get("token_version", 0))
+        current_version = int(user.get("token_version", 1))
+        if token_version != current_version:
+            raise ValueError("Versi token sudah tidak valid")
+        return {"username": username, "role": user.get("role", "user"), "token_version": current_version}
     except Exception:
-        logout()
+        logout(reason="token_invalid")
         return None
 
 
+def validate_uploaded_xlsx(file_obj: Any, label: str = "file") -> Optional[str]:
+    if file_obj is None:
+        return None
+    name = getattr(file_obj, "name", label) or label
+    if not name.lower().endswith(".xlsx"):
+        return f"{label}: hanya file .xlsx yang diizinkan."
+    try:
+        raw = file_obj.getvalue()
+    except Exception:
+        return f"{label}: file tidak bisa dibaca."
+    size_mb = len(raw) / (1024 * 1024)
+    if size_mb > MAX_SINGLE_UPLOAD_MB:
+        return f"{label}: ukuran file {size_mb:.1f} MB melebihi batas {MAX_SINGLE_UPLOAD_MB} MB per file."
+    try:
+        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+            infos = zf.infolist()
+            if len(infos) > MAX_XLSX_ENTRIES:
+                return f"{label}: struktur file terlalu kompleks / mencurigakan."
+            total_uncompressed = sum(int(info.file_size) for info in infos)
+            total_uncompressed_mb = total_uncompressed / (1024 * 1024)
+            if total_uncompressed_mb > MAX_XLSX_UNCOMPRESSED_MB:
+                return f"{label}: ukuran konten terdekompresi terlalu besar ({total_uncompressed_mb:.1f} MB)."
+            required_prefixes = ("xl/", "_rels/", "docProps/", "[Content_Types].xml")
+            names = [info.filename for info in infos]
+            if not any(n == "[Content_Types].xml" for n in names):
+                return f"{label}: file XLSX tidak valid."
+            if not any(n.startswith("xl/") for n in names):
+                return f"{label}: file XLSX tidak valid."
+            for info in infos:
+                fname = info.filename
+                if fname.startswith("/") or ".." in fname.replace("\\", "/"):
+                    return f"{label}: nama entry XLSX tidak valid."
+                if info.compress_size > 0 and (info.file_size / info.compress_size) > 150:
+                    return f"{label}: rasio kompresi file terlalu tinggi / mencurigakan."
+    except zipfile.BadZipFile:
+        return f"{label}: file XLSX tidak valid atau rusak."
+    except Exception as exc:
+        return f"{label}: validasi file gagal ({exc})."
+    return None
+
+
+def validate_file_batch(file_map: Dict[str, Any]) -> Optional[str]:
+    for label, obj in file_map.items():
+        if isinstance(obj, list):
+            for idx, item in enumerate(obj, start=1):
+                err = validate_uploaded_xlsx(item, f"{label} #{idx}")
+                if err:
+                    return err
+        else:
+            err = validate_uploaded_xlsx(obj, label)
+            if err:
+                return err
+    return None
+
+
 def render_login_page() -> Optional[Dict[str, Any]]:
+    if not ensure_security_bootstrap():
+        return None
+
     st.title(f"{APP_TITLE} - Login")
+    st.caption("Keamanan login sudah diperketat: hash password lebih kuat, ada lockout saat brute-force, dan token akan invalid setelah reset password.")
 
     with st.form("login_form"):
         username = st.text_input("Username", key="login_username")
@@ -317,10 +702,13 @@ def render_user_management(current_user: Dict[str, Any]):
             "role": info.get("role", "user"),
             "created_at": info.get("created_at", ""),
             "password_reset_at": info.get("password_reset_at", ""),
+            "token_version": info.get("token_version", 1),
+            "password_algo": info.get("password_algo", "legacy"),
         })
 
     st.subheader("Daftar User")
     st.dataframe(pd.DataFrame(user_rows), use_container_width=True, hide_index=True)
+    st.info("Password policy baru: minimal 12 karakter, wajib huruf besar, huruf kecil, angka, dan simbol.")
 
     tab_add, tab_bulk, tab_reset, tab_delete = st.tabs([
         "Tambah User",
@@ -339,7 +727,7 @@ def render_user_management(current_user: Dict[str, Any]):
                 if new_password != confirm_password:
                     st.error("Konfirmasi password tidak sama.")
                 else:
-                    ok, message = register_user(new_username, new_password)
+                    ok, message = register_user(new_username, new_password, actor=current_user.get("username", "admin"))
                     if ok:
                         st.success(message)
                         st.rerun()
@@ -349,8 +737,8 @@ def render_user_management(current_user: Dict[str, Any]):
     with tab_bulk:
         st.write("Upload file Excel (.xlsx) dengan kolom wajib: username, password")
         sample_df = pd.DataFrame([
-            {"username": "andi", "password": "andi1234"},
-            {"username": "budi", "password": "budi1234"},
+            {"username": "andi", "password": "Andi#2026Aman"},
+            {"username": "budi", "password": "Budi#2026Aman"},
         ])
         output = io.BytesIO()
         with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -369,19 +757,23 @@ def render_user_management(current_user: Dict[str, Any]):
             help="Kolom wajib: username, password",
         )
         if bulk_file is not None:
-            try:
-                df = pd.read_excel(bulk_file)
-                st.dataframe(df, use_container_width=True, hide_index=True)
-                if st.button("Proses Import User", key="process_bulk_user_import"):
-                    ok, summary, results = bulk_register_users_from_dataframe(df)
-                    if ok:
-                        st.success(summary)
-                        st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
-                        st.rerun()
-                    else:
-                        st.error(summary)
-            except Exception as e:
-                st.error(f"Gagal membaca file Excel: {e}")
+            validation_error = validate_uploaded_xlsx(bulk_file, "File import user")
+            if validation_error:
+                st.error(validation_error)
+            else:
+                try:
+                    df = pd.read_excel(io.BytesIO(bulk_file.getvalue()))
+                    st.dataframe(df, use_container_width=True, hide_index=True)
+                    if st.button("Proses Import User", key="process_bulk_user_import"):
+                        ok, summary, results = bulk_register_users_from_dataframe(df, actor=current_user.get("username", "admin"))
+                        if ok:
+                            st.success(summary)
+                            st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
+                            st.rerun()
+                        else:
+                            st.error(summary)
+                except Exception as e:
+                    st.error(f"Gagal membaca file Excel: {e}")
 
     with tab_reset:
         target_options = [u for u in users.keys()]
@@ -394,7 +786,7 @@ def render_user_management(current_user: Dict[str, Any]):
                 if new_password != confirm_password:
                     st.error("Konfirmasi password tidak sama.")
                 else:
-                    ok, message = reset_user_password(target_username, new_password)
+                    ok, message = reset_user_password(target_username, new_password, actor=current_user.get("username", "admin"))
                     if ok:
                         st.success(message)
                         st.rerun()
@@ -423,6 +815,8 @@ def render_user_management(current_user: Dict[str, Any]):
 
 
 def require_authentication() -> Optional[Dict[str, Any]]:
+    if not ensure_security_bootstrap():
+        return None
     user = get_current_user()
     if user:
         return user
@@ -935,6 +1329,9 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
 
 
 def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file})
+    if validation_error:
+        raise ValueError(validation_error)
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -1035,6 +1432,9 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
 
 
 def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file})
+    if validation_error:
+        raise ValueError(validation_error)
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -1206,6 +1606,9 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # PRICE PROCESSORS
 # ============================================================
 def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1285,6 +1688,9 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
 
 
 def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1334,6 +1740,9 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
 
 
 def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1383,6 +1792,9 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
 
 
 def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
+    validation_error = validate_file_batch({"Input TikTokShop": input_file, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
@@ -1433,6 +1845,9 @@ def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_f
 
 
 def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1549,6 +1964,9 @@ def process_submit_campaign_tiktokshop(
     discount_rp: int,
     price_key: str,
 ):
+    validation_error = validate_file_batch({"Mass Update": mass_files, "Pricelist": pricelist_file, "Addon Mapping": addon_file})
+    if validation_error:
+        raise ValueError(validation_error)
     price_map = load_pricelist_price_map_multisheet(
         pricelist_file.getvalue(),
         ["M3", "M4"],
@@ -1679,9 +2097,12 @@ def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
         return "Upload file mass update minimal 1 file."
     if len(mass_files) > MAX_MASS_FILES:
         return f"Maksimal {MAX_MASS_FILES} file per proses."
-    if total_upload_size_mb(mass_files) > MAX_TOTAL_UPLOAD_MB:
+    total_mb = total_upload_size_mb(mass_files)
+    if total_mb > MAX_TOTAL_UPLOAD_MB:
         return f"Total upload melebihi {MAX_TOTAL_UPLOAD_MB} MB."
-    return None
+    if total_mb > UPLOAD_WARN_TOTAL_MB:
+        st.warning(f"Total upload {total_mb:.1f} MB. Data tetap diproses penuh, tapi waktu proses bisa lebih lama.")
+    return validate_file_batch({"Mass Update": mass_files})
 
 
 # ============================================================
