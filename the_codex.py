@@ -10,8 +10,6 @@ import sqlite3
 import zipfile
 import gc
 import time
-import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -26,78 +24,34 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-@dataclass(frozen=True)
-class AppConfig:
-    app_title: str = os.environ.get("APP_TITLE", "The Codex Final")
-    max_mass_files: int = int(os.environ.get("APP_MAX_MASS_FILES", "30"))
-    max_total_upload_mb: int = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "40"))
-    max_single_upload_mb: int = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "20"))
-    max_xlsx_entries: int = int(os.environ.get("APP_MAX_XLSX_ENTRIES", "20000"))
-    max_xlsx_uncompressed_mb: int = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "120"))
-    bigseller_max_rows_per_file: int = int(os.environ.get("BIGSELLER_MAX_ROWS_PER_FILE", "10000"))
+APP_TITLE = "The Codex"
+MAX_MASS_FILES = int(os.environ.get("APP_MAX_MASS_FILES", "30"))
+MAX_TOTAL_UPLOAD_MB = int(os.environ.get("APP_MAX_TOTAL_UPLOAD_MB", "40"))
+MAX_SINGLE_UPLOAD_MB = int(os.environ.get("APP_MAX_SINGLE_UPLOAD_MB", "20"))
+MAX_XLSX_ENTRIES = int(os.environ.get("APP_MAX_XLSX_ENTRIES", "20000"))
+MAX_XLSX_UNCOMPRESSED_MB = int(os.environ.get("APP_MAX_XLSX_UNCOMPRESSED_MB", "120"))
+BIGSELLER_MAX_ROWS_PER_FILE = 10000
 
-    max_shopee_files: int = int(os.environ.get("APP_MAX_SHOPEE_FILES", "5"))
-    max_tiktok_files: int = int(os.environ.get("APP_MAX_TIKTOK_FILES", "3"))
-    max_bigseller_files: int = int(os.environ.get("APP_MAX_BIGSELLER_FILES", "30"))
-    max_shopee_file_mb: int = int(os.environ.get("APP_MAX_SHOPEE_FILE_MB", "3"))
-    max_tiktok_file_mb: int = int(os.environ.get("APP_MAX_TIKTOK_FILE_MB", "8"))
-    max_bigseller_file_mb: int = int(os.environ.get("APP_MAX_BIGSELLER_FILE_MB", "3"))
-    max_pricelist_file_mb: int = int(os.environ.get("APP_MAX_PRICELIST_FILE_MB", "20"))
-    max_addon_file_mb: int = int(os.environ.get("APP_MAX_ADDON_FILE_MB", "1"))
-    max_generic_input_file_mb: int = int(os.environ.get("APP_MAX_GENERIC_INPUT_FILE_MB", "8"))
+MAX_SHOPEE_FILES = int(os.environ.get("APP_MAX_SHOPEE_FILES", "5"))
+MAX_TIKTOK_FILES = int(os.environ.get("APP_MAX_TIKTOK_FILES", "3"))
+MAX_BIGSELLER_FILES = int(os.environ.get("APP_MAX_BIGSELLER_FILES", "30"))
+MAX_SHOPEE_FILE_MB = int(os.environ.get("APP_MAX_SHOPEE_FILE_MB", "3"))
+MAX_TIKTOK_FILE_MB = int(os.environ.get("APP_MAX_TIKTOK_FILE_MB", "8"))
+MAX_BIGSELLER_FILE_MB = int(os.environ.get("APP_MAX_BIGSELLER_FILE_MB", "3"))
+MAX_PRICELIST_FILE_MB = int(os.environ.get("APP_MAX_PRICELIST_FILE_MB", "20"))
+MAX_ADDON_FILE_MB = int(os.environ.get("APP_MAX_ADDON_FILE_MB", "1"))
+MAX_GENERIC_INPUT_FILE_MB = int(os.environ.get("APP_MAX_GENERIC_INPUT_FILE_MB", "8"))
 
-    auth_db: str = os.environ.get("APP_AUTH_DB", "codexid_auth.sqlite3")
-    legacy_auth_file: str = os.environ.get("APP_LEGACY_AUTH_FILE", "users_local.json")
-    jwt_secret: str = os.environ.get("APP_JWT_SECRET", "").strip()
-    jwt_algorithm: str = os.environ.get("APP_JWT_ALGORITHM", "HS256")
-    jwt_expire_hours: int = int(os.environ.get("APP_JWT_EXPIRE_HOURS", "8"))
-    default_admin_username: str = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
-    password_hash_scheme: str = "pbkdf2_sha256"
-    password_hash_iterations: int = int(os.environ.get("APP_PASSWORD_HASH_ITERATIONS", "310000"))
-    default_admin_password: str = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "").strip()
-    failed_login_window_minutes: int = int(os.environ.get("APP_FAILED_LOGIN_WINDOW_MINUTES", "15"))
-    failed_login_max_attempts: int = int(os.environ.get("APP_FAILED_LOGIN_MAX_ATTEMPTS", "5"))
-    login_lockout_minutes: int = int(os.environ.get("APP_LOGIN_LOCKOUT_MINUTES", "15"))
-
-    rate_limit_window_seconds: int = int(os.environ.get("APP_RATE_LIMIT_WINDOW_SECONDS", "60"))
-    rate_limit_max_requests_per_ip: int = int(os.environ.get("APP_RATE_LIMIT_MAX_REQUESTS_PER_IP", "120"))
-    rate_limit_max_login_attempts_per_ip: int = int(os.environ.get("APP_RATE_LIMIT_MAX_LOGIN_ATTEMPTS_PER_IP", "12"))
-    rate_limit_max_login_attempts_per_session: int = int(os.environ.get("APP_RATE_LIMIT_MAX_LOGIN_ATTEMPTS_PER_SESSION", "8"))
-    benchmark_rounds: int = int(os.environ.get("APP_BENCHMARK_ROUNDS", "20"))
-
-
-CONFIG = AppConfig()
-
-APP_TITLE = CONFIG.app_title
-MAX_MASS_FILES = CONFIG.max_mass_files
-MAX_TOTAL_UPLOAD_MB = CONFIG.max_total_upload_mb
-MAX_SINGLE_UPLOAD_MB = CONFIG.max_single_upload_mb
-MAX_XLSX_ENTRIES = CONFIG.max_xlsx_entries
-MAX_XLSX_UNCOMPRESSED_MB = CONFIG.max_xlsx_uncompressed_mb
-BIGSELLER_MAX_ROWS_PER_FILE = CONFIG.bigseller_max_rows_per_file
-
-MAX_SHOPEE_FILES = CONFIG.max_shopee_files
-MAX_TIKTOK_FILES = CONFIG.max_tiktok_files
-MAX_BIGSELLER_FILES = CONFIG.max_bigseller_files
-MAX_SHOPEE_FILE_MB = CONFIG.max_shopee_file_mb
-MAX_TIKTOK_FILE_MB = CONFIG.max_tiktok_file_mb
-MAX_BIGSELLER_FILE_MB = CONFIG.max_bigseller_file_mb
-MAX_PRICELIST_FILE_MB = CONFIG.max_pricelist_file_mb
-MAX_ADDON_FILE_MB = CONFIG.max_addon_file_mb
-MAX_GENERIC_INPUT_FILE_MB = CONFIG.max_generic_input_file_mb
-
-AUTH_DB = CONFIG.auth_db
-LEGACY_AUTH_FILE = CONFIG.legacy_auth_file
-JWT_SECRET = CONFIG.jwt_secret
-JWT_ALGORITHM = CONFIG.jwt_algorithm
-JWT_EXPIRE_HOURS = CONFIG.jwt_expire_hours
-DEFAULT_ADMIN_USERNAME = CONFIG.default_admin_username
-PASSWORD_HASH_SCHEME = CONFIG.password_hash_scheme
-PASSWORD_HASH_ITERATIONS = CONFIG.password_hash_iterations
-DEFAULT_ADMIN_PASSWORD = CONFIG.default_admin_password
-FAILED_LOGIN_WINDOW_MINUTES = CONFIG.failed_login_window_minutes
-FAILED_LOGIN_MAX_ATTEMPTS = CONFIG.failed_login_max_attempts
-LOGIN_LOCKOUT_MINUTES = CONFIG.login_lockout_minutes
+AUTH_DB = "codexid_auth.sqlite3"
+LEGACY_AUTH_FILE = "users_local.json"
+JWT_SECRET = os.environ.get("APP_JWT_SECRET", "").strip()
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRE_HOURS = int(os.environ.get("APP_JWT_EXPIRE_HOURS", "8"))
+DEFAULT_ADMIN_USERNAME = os.environ.get("APP_DEFAULT_USERNAME", "admin").strip() or "admin"
+DEFAULT_ADMIN_PASSWORD = os.environ.get("APP_BOOTSTRAP_ADMIN_PASSWORD", "").strip() or os.environ.get("APP_DEFAULT_PASSWORD", "admin123").strip()
+FAILED_LOGIN_WINDOW_MINUTES = int(os.environ.get("APP_FAILED_LOGIN_WINDOW_MINUTES", "15"))
+FAILED_LOGIN_MAX_ATTEMPTS = int(os.environ.get("APP_FAILED_LOGIN_MAX_ATTEMPTS", "5"))
+LOGIN_LOCKOUT_MINUTES = int(os.environ.get("APP_LOGIN_LOCKOUT_MINUTES", "15"))
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -114,237 +68,12 @@ SESSION_DEFAULTS = {
     "auth_user": None,
     "active_job_key": "",
     "active_job_label": "",
-    "session_id": uuid.uuid4().hex,
-    "startup_checks": None,
-    "startup_checks_ok": False,
-    "startup_check_ran": False,
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
         st.session_state[_k] = _v
 
 
-
-
-# ============================================================
-# RUNTIME / RATE LIMIT / STARTUP HELPERS
-# ============================================================
-RATE_LIMIT_TABLE = "request_rate_limits"
-INDEX_DEFINITIONS = [
-    ("idx_users_role", "CREATE INDEX IF NOT EXISTS idx_users_role ON users(role)"),
-    ("idx_users_created_at", "CREATE INDEX IF NOT EXISTS idx_users_created_at ON users(created_at)"),
-    ("idx_login_attempts_locked_until", "CREATE INDEX IF NOT EXISTS idx_login_attempts_locked_until ON login_attempts(locked_until)"),
-    ("idx_audit_logs_ts", "CREATE INDEX IF NOT EXISTS idx_audit_logs_ts ON audit_logs(ts)"),
-    ("idx_audit_logs_event_ts", "CREATE INDEX IF NOT EXISTS idx_audit_logs_event_ts ON audit_logs(event, ts)"),
-    ("idx_rate_limits_scope_key_window", "CREATE INDEX IF NOT EXISTS idx_rate_limits_scope_key_window ON request_rate_limits(scope, key, window_started_at)"),
-]
-
-
-def get_session_id() -> str:
-    session_id = st.session_state.get("session_id", "")
-    if not session_id:
-        session_id = uuid.uuid4().hex
-        st.session_state.session_id = session_id
-    return session_id
-
-
-def get_client_ip() -> str:
-    candidates: List[str] = []
-    try:
-        headers = getattr(getattr(st, "context", None), "headers", None)
-        if headers:
-            for key in ["X-Forwarded-For", "X-Real-IP", "Remote-Addr", "CF-Connecting-IP"]:
-                value = headers.get(key) or headers.get(key.lower())
-                if value:
-                    candidates.append(str(value).split(",")[0].strip())
-    except Exception:
-        pass
-    for env_key in ["HTTP_X_FORWARDED_FOR", "REMOTE_ADDR"]:
-        if os.environ.get(env_key):
-            candidates.append(os.environ[env_key].split(",")[0].strip())
-    return next((item for item in candidates if item), "unknown-ip")
-
-
-def utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def ensure_db_indexes(conn: sqlite3.Connection):
-    for _, sql in INDEX_DEFINITIONS:
-        conn.execute(sql)
-
-
-def ensure_rate_limit_table(conn: sqlite3.Connection):
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {RATE_LIMIT_TABLE} (
-            scope TEXT NOT NULL,
-            key TEXT NOT NULL,
-            window_started_at INTEGER NOT NULL,
-            request_count INTEGER NOT NULL DEFAULT 0,
-            updated_at TEXT NOT NULL,
-            PRIMARY KEY(scope, key, window_started_at)
-        )
-    """)
-
-
-def prune_rate_limit_rows(conn: sqlite3.Connection, current_window: int):
-    conn.execute(
-        f"DELETE FROM {RATE_LIMIT_TABLE} WHERE window_started_at < ?",
-        (current_window - (CONFIG.rate_limit_window_seconds * 20),),
-    )
-
-
-def check_rate_limit(scope: str, key: str, limit: int, window_seconds: int) -> Tuple[bool, int, int]:
-    now_ts = int(time.time())
-    current_window = now_ts - (now_ts % window_seconds)
-    with get_db_connection() as conn:
-        ensure_rate_limit_table(conn)
-        ensure_db_indexes(conn)
-        conn.execute(
-            f"""
-            INSERT INTO {RATE_LIMIT_TABLE}(scope, key, window_started_at, request_count, updated_at)
-            VALUES (?, ?, ?, 1, ?)
-            ON CONFLICT(scope, key, window_started_at)
-            DO UPDATE SET request_count = request_count + 1, updated_at = excluded.updated_at
-            """,
-            (scope, key, current_window, utc_now_iso()),
-        )
-        count = conn.execute(
-            f"SELECT request_count FROM {RATE_LIMIT_TABLE} WHERE scope = ? AND key = ? AND window_started_at = ?",
-            (scope, key, current_window),
-        ).fetchone()[0]
-        prune_rate_limit_rows(conn, current_window)
-        conn.commit()
-    remaining = max(0, limit - int(count))
-    return count <= limit, int(count), remaining
-
-
-def enforce_request_rate_limits(is_login: bool = False):
-    ip = get_client_ip()
-    session_key = get_session_id()
-    ip_limit = CONFIG.rate_limit_max_login_attempts_per_ip if is_login else CONFIG.rate_limit_max_requests_per_ip
-    session_limit = CONFIG.rate_limit_max_login_attempts_per_session if is_login else CONFIG.rate_limit_max_requests_per_ip
-
-    ok_ip, _, remaining_ip = check_rate_limit("login_ip" if is_login else "req_ip", ip, ip_limit, CONFIG.rate_limit_window_seconds)
-    ok_session, _, remaining_session = check_rate_limit("login_session" if is_login else "req_session", session_key, session_limit, CONFIG.rate_limit_window_seconds)
-
-    if not ok_ip or not ok_session:
-        append_audit_log(
-            "rate_limit_blocked",
-            actor=session_key,
-            target=ip,
-            status="blocked",
-            details={
-                "is_login": is_login,
-                "remaining_ip": remaining_ip,
-                "remaining_session": remaining_session,
-            },
-        )
-        st.error("Terlalu banyak request dalam waktu singkat. Coba lagi sebentar.")
-        st.stop()
-
-
-def run_startup_self_check() -> Dict[str, Any]:
-    checks: List[Dict[str, str]] = []
-
-    def add_check(name: str, ok: bool, detail: str):
-        checks.append({"name": name, "status": "OK" if ok else "ERROR", "detail": detail})
-
-    try:
-        db_path = get_auth_db_path()
-        with get_db_connection() as conn:
-            init_auth_db()
-            ensure_rate_limit_table(conn)
-            ensure_db_indexes(conn)
-            conn.execute("SELECT 1").fetchone()
-            conn.commit()
-        add_check("Database", True, f"SQLite siap dipakai: {db_path}")
-    except Exception as exc:
-        add_check("Database", False, f"Gagal init DB: {exc}")
-
-    jwt_ok = bool(JWT_SECRET and JWT_SECRET.lower() != "ganti-secret-ini-di-production")
-    add_check("JWT Secret", jwt_ok, "JWT secret aman." if jwt_ok else "APP_JWT_SECRET belum aman.")
-
-    try:
-        parent = Path(get_auth_db_path()).parent
-        parent.mkdir(parents=True, exist_ok=True)
-        probe = parent / ".startup_probe"
-        probe.write_text("ok", encoding="utf-8")
-        probe.unlink(missing_ok=True)
-        add_check("Filesystem", True, f"Folder writable: {parent}")
-    except Exception as exc:
-        add_check("Filesystem", False, f"Tidak bisa menulis file probe: {exc}")
-
-    try:
-        with get_db_connection() as conn:
-            index_names = {row[1] for row in conn.execute("PRAGMA index_list('audit_logs')").fetchall()}
-        add_check("Indexes", True, f"Index audit_logs aktif: {', '.join(sorted(index_names)) or '-'}")
-    except Exception as exc:
-        add_check("Indexes", False, f"Gagal membaca index: {exc}")
-
-    ok = all(item["status"] == "OK" for item in checks)
-    return {"ok": ok, "ran_at": utc_now_iso(), "checks": checks}
-
-
-def ensure_startup_checks() -> Dict[str, Any]:
-    if not st.session_state.get("startup_check_ran", False):
-        result = run_startup_self_check()
-        st.session_state.startup_checks = result
-        st.session_state.startup_checks_ok = result["ok"]
-        st.session_state.startup_check_ran = True
-    return st.session_state.get("startup_checks") or {"ok": False, "checks": []}
-
-
-def run_mini_benchmark(rounds: int = None) -> Dict[str, Any]:
-    rounds = rounds or CONFIG.benchmark_rounds
-    username = "benchmark_user"
-    password = "BenchmarkPass123!"
-
-    with get_db_connection() as conn:
-        ensure_rate_limit_table(conn)
-        ensure_db_indexes(conn)
-        conn.commit()
-
-    t0 = time.perf_counter()
-    for _ in range(rounds):
-        hash_password(password)
-    hash_ms = ((time.perf_counter() - t0) / rounds) * 1000
-
-    user = get_user_record(username)
-    if not user:
-        salt, password_hash = hash_password(password)
-        with get_db_connection() as conn:
-            conn.execute(
-                "INSERT OR REPLACE INTO users(username, salt, password_hash, role, created_at, token_version) VALUES (?, ?, ?, 'user', ?, 1)",
-                (username, salt, password_hash, utc_now_iso()),
-            )
-            conn.commit()
-        user = get_user_record(username)
-
-    t1 = time.perf_counter()
-    for _ in range(rounds):
-        verify_password(password, user.get("salt", ""), user.get("password_hash", ""))
-    verify_ms = ((time.perf_counter() - t1) / rounds) * 1000
-
-    t2 = time.perf_counter()
-    for idx in range(rounds):
-        check_rate_limit("bench", f"{get_session_id()}-{idx % 3}", 999999, CONFIG.rate_limit_window_seconds)
-    rate_ms = ((time.perf_counter() - t2) / rounds) * 1000
-
-    t3 = time.perf_counter()
-    with get_db_connection() as conn:
-        for _ in range(rounds):
-            conn.execute("SELECT username, role, token_version FROM users WHERE username = ?", (username,)).fetchone()
-    select_ms = ((time.perf_counter() - t3) / rounds) * 1000
-
-    return {
-        "rounds": rounds,
-        "hash_password_ms_avg": round(hash_ms, 3),
-        "verify_password_ms_avg": round(verify_ms, 3),
-        "rate_limit_ms_avg": round(rate_ms, 3),
-        "db_select_ms_avg": round(select_ms, 3),
-        "ran_at": utc_now_iso(),
-    }
 
 
 # ============================================================
@@ -398,8 +127,6 @@ def init_auth_db():
                 details_json TEXT
             )
         """)
-        ensure_rate_limit_table(conn)
-        ensure_db_indexes(conn)
         conn.commit()
 
 
@@ -413,35 +140,6 @@ def append_audit_log(event: str, actor: str = "system", target: str = "", status
             conn.commit()
     except Exception:
         pass
-
-
-def file_exists_and_nonempty(path: str) -> bool:
-    return os.path.exists(path) and os.path.getsize(path) > 0
-
-
-def get_security_bootstrap_issues() -> List[str]:
-    issues: List[str] = []
-    auth_exists = file_exists_and_nonempty(get_auth_db_path())
-    if not JWT_SECRET or JWT_SECRET.lower() == "ganti-secret-ini-di-production":
-        issues.append("APP_JWT_SECRET wajib di-set dan tidak boleh pakai nilai default.")
-    if not auth_exists and not DEFAULT_ADMIN_PASSWORD:
-        issues.append("APP_BOOTSTRAP_ADMIN_PASSWORD wajib di-set saat pertama kali bootstrap admin.")
-    return issues
-
-
-def ensure_security_bootstrap() -> bool:
-    issues = get_security_bootstrap_issues()
-    if not issues:
-        return True
-    st.error("Konfigurasi keamanan belum lengkap. App dihentikan sampai environment variable aman di-set.")
-    for item in issues:
-        st.write(f"- {item}")
-    st.code(
-        "APP_JWT_SECRET=<secret-random-panjang>\n"
-        "APP_BOOTSTRAP_ADMIN_PASSWORD=<password-admin-kuat>",
-        language="bash",
-    )
-    return False
 
 
 def migrate_legacy_auth_json_if_needed():
@@ -482,43 +180,13 @@ def migrate_legacy_auth_json_if_needed():
 
 def hash_password(password: str, salt: Optional[str] = None) -> Tuple[str, str]:
     salt = salt or secrets.token_hex(16)
-    derived = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt.encode("utf-8"),
-        PASSWORD_HASH_ITERATIONS,
-    )
-    encoded = base64.b64encode(derived).decode("utf-8")
-    return salt, f"{PASSWORD_HASH_SCHEME}${PASSWORD_HASH_ITERATIONS}${salt}${encoded}"
+    digest = hashlib.sha256(f"{salt}:{password}".encode("utf-8")).hexdigest()
+    return salt, digest
 
 
 def verify_password(password: str, salt: str, password_hash: str) -> bool:
-    if not password_hash:
-        return False
-
-    if password_hash.startswith(f"{PASSWORD_HASH_SCHEME}$"):
-        try:
-            _, iterations_s, saved_salt, encoded = password_hash.split("$", 3)
-            iterations = int(iterations_s)
-            derived = hashlib.pbkdf2_hmac(
-                "sha256",
-                password.encode("utf-8"),
-                saved_salt.encode("utf-8"),
-                iterations,
-            )
-            actual = base64.b64encode(derived).decode("utf-8")
-            return hmac.compare_digest(actual, encoded)
-        except Exception:
-            return False
-
-    legacy_salt = salt or ""
-    digest = hashlib.sha256(f"{legacy_salt}:{password}".encode("utf-8")).hexdigest()
+    _, digest = hash_password(password, salt)
     return hmac.compare_digest(digest, password_hash)
-
-
-def password_needs_rehash(user_record: Dict[str, Any]) -> bool:
-    stored = str(user_record.get("password_hash", ""))
-    return not stored.startswith(f"{PASSWORD_HASH_SCHEME}$")
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -562,17 +230,14 @@ def decode_jwt(token: str) -> Dict[str, Any]:
 
 
 def bootstrap_admin_if_needed():
-    if not ensure_security_bootstrap():
-        return
     with get_db_connection() as conn:
         count = conn.execute("SELECT COUNT(*) FROM users").fetchone()[0]
         if count > 0:
             return
         salt, password_hash = hash_password(DEFAULT_ADMIN_PASSWORD)
-        now_iso = datetime.now(timezone.utc).isoformat()
         conn.execute(
-            "INSERT INTO users(username, salt, password_hash, role, created_at, password_reset_at, token_version) VALUES (?, ?, ?, 'admin', ?, ?, 1)",
-            (DEFAULT_ADMIN_USERNAME, salt, password_hash, now_iso, now_iso),
+            "INSERT INTO users(username, salt, password_hash, role, created_at, token_version) VALUES (?, ?, ?, 'admin', ?, 1)",
+            (DEFAULT_ADMIN_USERNAME, salt, password_hash, datetime.now(timezone.utc).isoformat()),
         )
         conn.commit()
         append_audit_log("bootstrap_admin", target=DEFAULT_ADMIN_USERNAME)
@@ -711,18 +376,10 @@ def validate_username(username: str) -> Tuple[bool, str, str]:
 
 
 def validate_password(password: str) -> Tuple[bool, str]:
-    password = password or ""
-    if len(password) < 10:
-        return False, "Password minimal 10 karakter."
-    if not re.search(r"[A-Z]", password):
-        return False, "Password wajib mengandung huruf besar."
-    if not re.search(r"[a-z]", password):
-        return False, "Password wajib mengandung huruf kecil."
-    if not re.search(r"\d", password):
-        return False, "Password wajib mengandung angka."
-    if not re.search(r"[^A-Za-z0-9]", password):
-        return False, "Password wajib mengandung simbol."
+    if len(password) < 6:
+        return False, "Password minimal 6 karakter."
     return True, ""
+
 
 
 def register_user(username: str, password: str, role: str = "user") -> Tuple[bool, str]:
@@ -828,7 +485,6 @@ def bulk_register_users_from_dataframe(df: pd.DataFrame) -> Tuple[bool, str, Lis
 
 
 def authenticate_user(username: str, password: str) -> Tuple[bool, str, Optional[Dict[str, Any]]]:
-    enforce_request_rate_limits(is_login=True)
     username = s_clean(username)
     locked, lock_message = is_login_locked(username)
     if locked:
@@ -922,7 +578,6 @@ def get_current_user() -> Optional[Dict[str, Any]]:
 
 def render_login_page() -> Optional[Dict[str, Any]]:
     st.title(f"{APP_TITLE} - Login")
-    st.caption(f"Session: {get_session_id()[:8]} • IP: {get_client_ip()}")
 
     with st.form("login_form"):
         username = st.text_input("Username", key="login_username")
@@ -1061,12 +716,6 @@ def render_user_management(current_user: Dict[str, Any]):
 
 
 def require_authentication() -> Optional[Dict[str, Any]]:
-    startup = ensure_startup_checks()
-    enforce_request_rate_limits(is_login=False)
-    if not startup.get("ok"):
-        st.error("Startup self-check gagal. Perbaiki konfigurasi sebelum app dipakai.")
-        st.dataframe(pd.DataFrame(startup.get("checks", [])), use_container_width=True, hide_index=True)
-        st.stop()
     if not JWT_SECRET:
         st.error("APP_JWT_SECRET belum di-set. Set environment variable ini sebelum app dipakai publik.")
         st.stop()
@@ -1268,21 +917,6 @@ def safe_set_cell_value(ws: Worksheet, row: int, col: int, value):
     cell.value = value
 
 
-def batch_delete_unkept_rows(ws: Worksheet, data_start_row: int, keep_rows: Set[int]):
-    """Delete all data rows from data_start_row onward except those in keep_rows.
-
-    Rows are deleted from bottom to top so worksheet indexes remain stable.
-    If keep_rows is empty, all data rows from data_start_row onward are deleted.
-    """
-    if data_start_row < 1 or ws.max_row < data_start_row:
-        return
-
-    keep = {int(r) for r in keep_rows if isinstance(r, int) and r >= data_start_row}
-    rows_to_delete = [r for r in range(data_start_row, ws.max_row + 1) if r not in keep]
-    for r in reversed(rows_to_delete):
-        ws.delete_rows(r, 1)
-
-
 def workbook_to_bytes(wb) -> bytes:
     out = io.BytesIO()
     wb.save(out)
@@ -1315,13 +949,31 @@ def make_issues_workbook(issues: List[Dict[str, Any]]) -> bytes:
     return workbook_to_bytes(wb)
 
 
+def format_duration(seconds: float) -> str:
+    seconds = max(0.0, float(seconds or 0.0))
+    if seconds < 60:
+        return f"{seconds:.2f} detik"
+    minutes = int(seconds // 60)
+    secs = seconds % 60
+    if minutes < 60:
+        return f"{minutes} menit {secs:.2f} detik"
+    hours = int(minutes // 60)
+    minutes = minutes % 60
+    return f"{hours} jam {minutes} menit {secs:.2f} detik"
+
+
 def render_summary(title: str, summary: Dict[str, Any]):
     st.subheader(title)
-    c1, c2, c3, c4 = st.columns(4)
+    c1, c2, c3, c4, c5 = st.columns(5)
     c1.metric("Jumlah File", int(summary.get("files_total", 0)))
     c2.metric("Baris Diperiksa", int(summary.get("rows_scanned", 0)))
     c3.metric("Baris Diupdate", int(summary.get("rows_written", 0)))
     c4.metric("Skip / Issue", int(summary.get("rows_unmatched", 0) + summary.get("issues_count", 0)))
+    c5.metric("Waktu Proses", format_duration(summary.get("elapsed_seconds", 0.0)))
+    elapsed = float(summary.get("elapsed_seconds", 0.0) or 0.0)
+    rows_scanned = int(summary.get("rows_scanned", 0) or 0)
+    if elapsed > 0 and rows_scanned > 0:
+        st.caption(f"Kecepatan: {rows_scanned / elapsed:,.0f} baris/detik")
 
 
 def cache_downloads(
@@ -1340,6 +992,13 @@ def cache_downloads(
     }
     if summary is not None:
         st.session_state.summary_cache[cache_key] = summary
+
+
+def run_timed_process(fn, *args, **kwargs):
+    start = time.perf_counter()
+    result = fn(*args, **kwargs)
+    elapsed = time.perf_counter() - start
+    return result, elapsed
 
 
 def render_downloads(cache_key: str):
@@ -2361,35 +2020,23 @@ def uploaded_file_size_mb(file_obj: Any) -> float:
 def validate_uploaded_xlsx(file_obj: Any, max_file_mb: int) -> Optional[str]:
     if file_obj is None:
         return None
-    name = getattr(file_obj, "name", "input") or "input"
-    if not name.lower().endswith(".xlsx"):
-        return f"File {name} harus berformat .xlsx."
-    raw = file_obj.getvalue()
-    size_mb = len(raw) / (1024 * 1024)
+    size_mb = uploaded_file_size_mb(file_obj)
     if size_mb > max_file_mb:
-        return f"File {name} melebihi {max_file_mb} MB."
+        return f"File {getattr(file_obj, 'name', 'input')} melebihi {max_file_mb} MB."
     try:
-        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        with zipfile.ZipFile(io.BytesIO(file_obj.getvalue())) as zf:
             infos = zf.infolist()
             if len(infos) > MAX_XLSX_ENTRIES:
-                return f"File {name} terlalu kompleks."
-            total_uncompressed = sum(int(info.file_size) for info in infos)
+                return f"File {getattr(file_obj, 'name', 'input')} terlalu kompleks."
+            total_uncompressed = sum(info.file_size for info in infos)
             if total_uncompressed > MAX_XLSX_UNCOMPRESSED_MB * 1024 * 1024:
-                return f"File {name} terlalu besar saat diekstrak."
-            if not any(info.filename == "[Content_Types].xml" for info in infos):
-                return f"File {name} bukan XLSX yang valid."
-            if not any(info.filename.startswith("xl/") for info in infos):
-                return f"File {name} bukan XLSX yang valid."
+                return f"File {getattr(file_obj, 'name', 'input')} terlalu besar saat diekstrak."
             for info in infos:
                 normalized = info.filename.replace("\\", "/")
-                if info.is_dir():
-                    continue
-                if normalized.startswith("/") or ".." in normalized.split("/"):
-                    return f"File {name} tidak valid."
-                if info.compress_size > 0 and info.file_size / max(info.compress_size, 1) > 150:
-                    return f"File {name} terindikasi zip bomb / tidak aman."
+                if ".." in normalized.split("/"):
+                    return f"File {getattr(file_obj, 'name', 'input')} tidak valid."
     except zipfile.BadZipFile:
-        return f"File {name} bukan XLSX yang valid."
+        return f"File {getattr(file_obj, 'name', 'input')} bukan XLSX yang valid."
     return None
 
 
@@ -2494,7 +2141,8 @@ def render_update_stok_shopee():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, mode, chosen_areas)
+            (result_bytes, issues_bytes, summary), elapsed = run_timed_process(process_stock_shopee, mass_files, pricelist_file, mode, chosen_areas)
+            summary["elapsed_seconds"] = elapsed
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2548,7 +2196,8 @@ def render_update_stok_tiktokshop():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, mode, chosen_areas)
+            (result_bytes, issues_bytes, summary), elapsed = run_timed_process(process_stock_tiktokshop, mass_files, pricelist_file, mode, chosen_areas)
+            summary["elapsed_seconds"] = elapsed
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2587,9 +2236,10 @@ def render_harga_normal_shopee():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
-                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
+            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
+                process_shopee_price_files, mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
             )
+            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2669,9 +2319,10 @@ def render_harga_normal_tiktokshop():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_normal(
-                mass_files, pricelist_file, addon_file, discount_rp
+            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
+                process_tiktokshop_price_normal, mass_files, pricelist_file, addon_file, discount_rp
             )
+            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2830,9 +2481,10 @@ def render_harga_normal_bigseller():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_bigseller(
-                mass_files, pricelist_file, addon_file, discount_rp
+            (result_bytes, result_name, issues_bytes, summary), elapsed = run_timed_process(
+                process_bigseller, mass_files, pricelist_file, addon_file, discount_rp
             )
+            summary["elapsed_seconds"] = elapsed
             cache_downloads("normal_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -2939,43 +2591,6 @@ def render_submit_campaign_tiktokshop():
 # ============================================================
 # SIDEBAR ROUTER
 # ============================================================
-def render_system_diagnostics(user: Dict[str, Any]):
-    st.title("System Diagnostics")
-    st.caption("Health check, startup self-check, dan benchmark mini untuk validasi speed/security/stabilitas.")
-
-    startup = ensure_startup_checks()
-    st.subheader("Startup Self-Check")
-    st.dataframe(pd.DataFrame(startup.get("checks", [])), use_container_width=True, hide_index=True)
-
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Startup Status", "OK" if startup.get("ok") else "ERROR")
-    col2.metric("Session ID", get_session_id()[:8])
-    col3.metric("Client IP", get_client_ip())
-
-    st.subheader("Structured Config")
-    config_df = pd.DataFrame([{
-        "key": key,
-        "value": getattr(CONFIG, key) if key not in {"jwt_secret", "default_admin_password"} else "***masked***"
-    } for key in CONFIG.__dataclass_fields__.keys()])
-    st.dataframe(config_df, use_container_width=True, hide_index=True)
-
-    st.subheader("Benchmark Mini")
-    rounds = st.number_input("Jumlah rounds", min_value=5, max_value=200, value=CONFIG.benchmark_rounds, step=5)
-    if st.button("Jalankan Benchmark", key="run_system_benchmark"):
-        result = run_mini_benchmark(int(rounds))
-        st.success(f"Benchmark selesai pada {result['ran_at']}")
-        st.dataframe(pd.DataFrame([{
-            "metric": k,
-            "value": v
-        } for k, v in result.items()]), use_container_width=True, hide_index=True)
-
-    st.subheader("Database Indexes")
-    with get_db_connection() as conn:
-        rows = conn.execute("SELECT name, tbl_name FROM sqlite_master WHERE type = 'index' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()
-    index_df = pd.DataFrame([{"index_name": row[0], "table_name": row[1]} for row in rows])
-    st.dataframe(index_df, use_container_width=True, hide_index=True)
-
-
 def build_menu(user: Dict[str, Any]) -> str:
     st.sidebar.title(APP_TITLE)
     st.sidebar.success(f"Login sebagai: {user['username']} ({user.get('role', 'user')})")
@@ -2989,7 +2604,7 @@ def build_menu(user: Dict[str, Any]) -> str:
 
     main_menu_options = ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"]
     if user.get("role") == "admin":
-        main_menu_options.extend(["Kelola User", "System Diagnostics"])
+        main_menu_options.append("Kelola User")
 
     group = st.sidebar.radio(
         "Menu Utama",
@@ -3049,8 +2664,6 @@ def build_menu(user: Dict[str, Any]) -> str:
 
     elif group == "Kelola User" and user.get("role") == "admin":
         route = "user_management"
-    elif group == "System Diagnostics" and user.get("role") == "admin":
-        route = "system_diagnostics"
 
     else:
         route = "dashboard"
@@ -3098,15 +2711,9 @@ def main():
         render_submit_campaign_tiktokshop()
     elif route == "user_management":
         render_user_management(user)
-    elif route == "system_diagnostics":
-        render_system_diagnostics(user)
     else:
         st.error("Menu tidak dikenal.")
 
 
 if __name__ == "__main__":
-    init_auth_db()
-    migrate_legacy_auth_json_if_needed()
-    bootstrap_admin_if_needed()
-    ensure_startup_checks()
     main()
