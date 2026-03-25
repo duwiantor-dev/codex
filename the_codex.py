@@ -1514,10 +1514,6 @@ def render_update_stok_shopee():
         [
             "Mass Update Shopee (.xlsx, Unprotect dulu)",
             "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
-            "Mode stok tersedia: Stok Nasional (TOT), Default, dan Stok Area",
-            "Mode Default = JKT-3B, JKT-3C, JKT-4B",
-            "Bisa pilih lebih dari 1 mode stok, misalnya Default + Stok Area",
-            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
         ],
     )
     c1, c2 = st.columns(2)
@@ -1559,10 +1555,6 @@ def render_update_stok_tiktokshop():
         [
             "Mass Update TikTokShop (.xlsx, Unprotect dulu)",
             "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
-            "Mode stok tersedia: Stok Nasional (TOT), Default, dan Stok Area",
-            "Mode Default = JKT-3B, JKT-3C, JKT-4B",
-            "Bisa pilih lebih dari 1 mode stok, misalnya Default + Stok Area",
-            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
         ],
     )
     c1, c2 = st.columns(2)
@@ -1604,10 +1596,6 @@ def render_update_stok_bigseller():
         [
             "Mass Update Bigseller (.xlsx, bisa banyak)",
             "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
-            "Mode stok tersedia: Stok Nasional (TOT), Default, dan Stok Area",
-            "Mode Default = JKT-3B, JKT-3C, JKT-4B",
-            "Bisa pilih lebih dari 1 mode stok, misalnya Default + Stok Area",
-            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
         ],
     )
     c1, c2 = st.columns(2)
