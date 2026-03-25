@@ -17,6 +17,8 @@ APP_TITLE = "The Codex"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
+DEFAULT_TONGLE_AREAS = ["JKT-3B", "JKT-3C", "JKT-4B"]
+STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -29,6 +31,7 @@ SESSION_DEFAULTS = {
     "summary_cache": {},
     "stock_shopee_areas_loaded": [],
     "stock_tiktokshop_areas_loaded": [],
+    "stock_bigseller_areas_loaded": [],
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
@@ -428,7 +431,14 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
         if su(sname) == "LAPTOP":
             delete_coming_block_in_laptop(wb[sname])
             break
-    target_sheets = sheet_range_between(wb.sheetnames, "LAPTOP", "SER OTH CON")
+
+    requested = {su(name): name for name in STOCK_PRICELIST_SHEETS}
+    target_sheets = [sname for sname in wb.sheetnames if su(sname) in requested]
+    if not target_sheets:
+        raise ValueError(
+            f"Sheet stok tidak ditemukan. Pricelist harus punya minimal salah satu sheet: {', '.join(STOCK_PRICELIST_SHEETS)}"
+        )
+
     merged_lookup: Dict[str, Dict[str, Any]] = {}
     areas_all: Set[str] = set()
     for sname in target_sheets:
@@ -440,7 +450,27 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
     return merged_lookup, sorted(areas_all)
 
 
-def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]) -> Optional[int]:
+def apply_stock_floor_rule(qty: Optional[int], zero_below: int = 0) -> Optional[int]:
+    if qty is None:
+        return None
+    qty = int(qty)
+    if zero_below > 0 and qty < int(zero_below):
+        return 0
+    return qty
+
+
+def get_default_tongle_areas(areas: List[str]) -> List[str]:
+    area_set = {su(a) for a in areas}
+    return [area for area in DEFAULT_TONGLE_AREAS if su(area) in area_set]
+
+
+def pick_stock_value(
+    sku_full: str,
+    stock_lookup: Dict[str, Dict],
+    mode: str,
+    chosen_areas: Set[str],
+    zero_below: int = 0,
+) -> Optional[int]:
     base, _ = split_sku_addons(sku_full)
     base_key = norm_sku(base)
     if not base_key or base_key not in stock_lookup:
@@ -449,7 +479,7 @@ def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, ch
     tot = rec.get("TOT")
     by_area = rec.get("by_area", {}) or {}
     if mode == "Stok Nasional (TOT)":
-        return tot if tot is not None else None
+        return apply_stock_floor_rule(tot if tot is not None else None, zero_below)
     if mode == "Stok Area":
         if not chosen_areas:
             return None
@@ -459,7 +489,7 @@ def pick_stock_value(sku_full: str, stock_lookup: Dict[str, Dict], mode: str, ch
             if area_name in chosen_areas:
                 total += int(v)
                 hit = True
-        return total if hit else None
+        return apply_stock_floor_rule(total if hit else None, zero_below)
     return None
 
 
@@ -499,7 +529,7 @@ def find_shopee_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]):
+def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str], zero_below: int = 0):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -513,7 +543,7 @@ def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str,
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, mode, chosen_areas)
+        new_qty = pick_stock_value(sku_full, stock_lookup, mode, chosen_areas, zero_below)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -541,7 +571,7 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
     return workbook_to_bytes(out_wb)
 
 
-def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
+def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -549,7 +579,7 @@ def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, mode: str, 
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, mode, chosen_areas)
+            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, mode, chosen_areas, zero_below)
             changed_rows_all.extend(rows)
             for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
                 summary[k] += stats[k]
@@ -599,7 +629,7 @@ def find_tiktokshop_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str]):
+def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], mode: str, chosen_areas: Set[str], zero_below: int = 0):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -613,7 +643,7 @@ def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, mode, chosen_areas)
+        new_qty = pick_stock_value(sku_full, stock_lookup, mode, chosen_areas, zero_below)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -641,7 +671,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
-def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str]):
+def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -649,7 +679,7 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: s
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, mode, chosen_areas)
+            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, mode, chosen_areas, zero_below)
             changed_rows_all.extend(rows)
             for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
                 summary[k] += stats[k]
@@ -662,6 +692,112 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, mode: s
     result_bytes = write_stock_tiktokshop_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
     return result_bytes, make_issues_workbook(issues) if issues else None, summary
+
+
+def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
+    header_row, found_cols = find_header_row_by_candidates(
+        ws,
+        {
+            "sku": ["SKU", "Seller SKU", "SKU Penjual"],
+            "qty": ["Stock", "Stok", "Quantity", "Qty"],
+        },
+        scan_rows=10,
+    )
+    return header_row + 1, found_cols["sku"], found_cols["qty"]
+
+
+def process_stock_bigseller(mass_files: List[Any], pricelist_file: Any, mode: str, chosen_areas: Set[str], zero_below: int = 0):
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    output_parts: List[Tuple[str, bytes]] = []
+    current_rows: List[List[Any]] = []
+    current_part = 1
+    output_header: List[Any] = []
+    header_len = 0
+
+    def flush_part():
+        nonlocal current_rows, current_part, output_parts, output_header, header_len
+        if not current_rows:
+            return
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        for c, val in enumerate(output_header, start=1):
+            ws.cell(row=1, column=c).value = val
+        for r_idx, row_vals in enumerate(current_rows, start=2):
+            for c, val in enumerate(row_vals, start=1):
+                ws.cell(row=r_idx, column=c).value = val
+        output_parts.append((f"hasil_update_stok_bigseller_part_{current_part}.xlsx", workbook_to_bytes(wb)))
+        current_rows = []
+        current_part += 1
+
+    for mf in mass_files:
+        wb = None
+        try:
+            wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=False, data_only=False)
+            ws = wb.worksheets[0]
+            data_start, sku_col, qty_col = find_bigseller_stock_columns(ws)
+
+            if not output_header:
+                header_row = data_start - 1
+                output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
+                header_len = ws.max_column
+
+            for r in range(data_start, ws.max_row + 1):
+                sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+                if not sku_full:
+                    continue
+
+                summary["rows_scanned"] += 1
+                old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+                new_qty = pick_stock_value(sku_full, stock_lookup, mode, chosen_areas, zero_below)
+
+                if new_qty is None:
+                    summary["rows_unmatched"] += 1
+                    issues.append({
+                        "file": mf.name,
+                        "row": r,
+                        "sku_full": sku_full,
+                        "old_value": old_qty,
+                        "new_value": "",
+                        "reason": "SKU tidak ditemukan di Pricelist stok",
+                    })
+                    continue
+
+                if old_qty is not None and int(old_qty) == int(new_qty):
+                    continue
+
+                row_vals = [ws.cell(row=r, column=c).value for c in range(1, header_len + 1)]
+                row_vals[qty_col - 1] = int(new_qty)
+                current_rows.append(row_vals)
+                summary["rows_written"] += 1
+
+                if len(current_rows) >= BIGSELLER_MAX_ROWS_PER_FILE:
+                    flush_part()
+
+        except Exception as e:
+            issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
+        finally:
+            try:
+                if wb is not None:
+                    wb.close()
+            except Exception:
+                pass
+
+    flush_part()
+    summary["issues_count"] = len(issues)
+    if not output_parts:
+        empty_wb = Workbook()
+        empty_ws = empty_wb.active
+        empty_ws.title = "Sheet1"
+        if output_header:
+            for c, val in enumerate(output_header, start=1):
+                empty_ws.cell(row=1, column=c).value = val
+        output_parts.append(("hasil_update_stok_bigseller_part_1.xlsx", workbook_to_bytes(empty_wb)))
+    if len(output_parts) == 1:
+        return output_parts[0][1], output_parts[0][0], make_issues_workbook(issues) if issues else None, summary
+    return zip_named_files(output_parts), "hasil_update_stok_bigseller.zip", make_issues_workbook(issues) if issues else None, summary
 
 
 # ============================================================
@@ -1284,6 +1420,39 @@ def page_header(title: str, desc: str, requirements: List[str]):
             st.write(f"- {item}")
 
 
+def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: str, loaded_areas_key: str, load_button_key: str):
+    mode = st.radio("Mode Stok", ["Stok Nasional (TOT)", "Stok Area"], horizontal=True, key=mode_key)
+    zero_below = st.number_input("Stok < angka ini jadi 0", min_value=0, value=0, step=1, key=f"{area_key_prefix}_zero_below")
+
+    if st.button("Load Data Area", key=load_button_key):
+        if pricelist_file is None:
+            st.error("Upload Pricelist dulu.")
+        else:
+            try:
+                _, areas = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+                st.session_state[loaded_areas_key] = areas
+                defaults = get_default_tongle_areas(areas)
+                if defaults:
+                    st.session_state[f"{area_key_prefix}_areas"] = defaults
+                st.success(f"Data area berhasil dimuat: {len(areas)} area")
+            except Exception as e:
+                st.error(f"Gagal load data area: {e}")
+
+    areas = st.session_state.get(loaded_areas_key, [])
+    chosen_areas: Set[str] = set()
+    if mode == "Stok Area":
+        default_areas = st.session_state.get(f"{area_key_prefix}_areas", get_default_tongle_areas(areas))
+        chosen_areas = set(st.multiselect(
+            "Pilih Area (default Tongle: JKT-3B, JKT-3C, JKT-4B)",
+            areas,
+            default=default_areas,
+            key=f"{area_key_prefix}_areas",
+        ))
+
+    process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
+    return mode, chosen_areas, zero_below, process_disabled
+
+
 def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
     if not mass_files:
         return "Upload file mass update minimal 1 file."
@@ -1303,7 +1472,7 @@ def render_dashboard():
     c1, c2, c3, c4 = st.columns(4)
     with c1:
         st.subheader("Update Stok")
-        st.write("- Shopee (Mall & Star)\n- TikTokShop")
+        st.write("- Shopee (Mall & Star)\n- TikTokShop\n- Bigseller")
     with c2:
         st.subheader("Update Harga Normal")
         st.write("- Shopee (Mall & Star)\n- TikTokShop\n- PowerMerchant\n- Bigseller")
@@ -1319,33 +1488,27 @@ def render_dashboard():
 def render_update_stok_shopee():
     page_header(
         "Update Stok Shopee (Mall & Star)",
-        "Memproses file mass update Shopee (Mall & Star) berdasarkan stok dari pricelist multi-sheet.",
-        ["Mass Update Shopee (.xlsx, Unprotect dulu)", "Pricelist (.xlsx, tidak perlu ada yang di ubah)", "Jika pakai stok area, klik 'Load Data Area' dulu lalu pilih area"],
+        "Memproses file mass update Shopee (Mall & Star) berdasarkan stok dari sheet pricelist LAPTOP, TELCO, dan PC HOM ELE.",
+        [
+            "Mass Update Shopee (.xlsx, Unprotect dulu)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+            "Area default Tongle: JKT-3B, JKT-3C, JKT-4B",
+            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
+        ],
     )
     c1, c2 = st.columns(2)
     with c1:
         mass_files = st.file_uploader("Upload Mass Update Shopee (Mall & Star)", type=["xlsx"], accept_multiple_files=True, key="stock_shopee_mass")
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_shopee_pl")
-    mode = st.radio("Mode Stok", ["Stok Nasional (TOT)", "Stok Area"], horizontal=True)
 
-    if st.button("Load Data Area", key="load_area_shopee"):
-        if pricelist_file is None:
-            st.error("Upload Pricelist dulu.")
-        else:
-            try:
-                _, areas = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
-                st.session_state.stock_shopee_areas_loaded = areas
-                st.success(f"Data area berhasil dimuat: {len(areas)} area")
-            except Exception as e:
-                st.error(f"Gagal load data area: {e}")
-
-    chosen_areas = set()
-    areas = st.session_state.stock_shopee_areas_loaded
-    if mode == "Stok Area":
-        chosen_areas = set(st.multiselect("Pilih Area", areas, key="stock_shopee_areas"))
-
-    process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
+    mode, chosen_areas, zero_below, process_disabled = render_stock_controls(
+        area_key_prefix="stock_shopee",
+        pricelist_file=pricelist_file,
+        mode_key="stock_shopee_mode",
+        loaded_areas_key="stock_shopee_areas_loaded",
+        load_button_key="load_area_shopee",
+    )
 
     if st.button("Proses", key="btn_stock_shopee", disabled=process_disabled):
         err = validate_mass_uploads(mass_files)
@@ -1356,7 +1519,7 @@ def render_update_stok_shopee():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, mode, chosen_areas)
+            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, mode, chosen_areas, zero_below)
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1368,33 +1531,27 @@ def render_update_stok_shopee():
 def render_update_stok_tiktokshop():
     page_header(
         "Update Stok TikTokShop",
-        "Memproses file mass update TikTokShop berdasarkan stok dari pricelist multi-sheet.",
-        ["Mass Update TikTokShop (.xlsx, Unprotect dulu)", "Pricelist (.xlsx, tidak perlu ada yang di ubah)", "Jika pakai stok area, klik 'Load Data Area' dulu lalu pilih area"],
+        "Memproses file mass update TikTokShop berdasarkan stok dari sheet pricelist LAPTOP, TELCO, dan PC HOM ELE.",
+        [
+            "Mass Update TikTokShop (.xlsx, Unprotect dulu)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+            "Area default Tongle: JKT-3B, JKT-3C, JKT-4B",
+            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
+        ],
     )
     c1, c2 = st.columns(2)
     with c1:
         mass_files = st.file_uploader("Upload Mass Update TikTokShop", type=["xlsx"], accept_multiple_files=True, key="stock_tiktokshop_mass")
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_tiktokshop_pl")
-    mode = st.radio("Mode Stok", ["Stok Nasional (TOT)", "Stok Area"], horizontal=True, key="stock_tiktokshop_mode")
 
-    if st.button("Load Data Area", key="load_area_tiktokshop"):
-        if pricelist_file is None:
-            st.error("Upload Pricelist dulu.")
-        else:
-            try:
-                _, areas = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
-                st.session_state.stock_tiktokshop_areas_loaded = areas
-                st.success(f"Data area berhasil dimuat: {len(areas)} area")
-            except Exception as e:
-                st.error(f"Gagal load data area: {e}")
-
-    chosen_areas = set()
-    areas = st.session_state.stock_tiktokshop_areas_loaded
-    if mode == "Stok Area":
-        chosen_areas = set(st.multiselect("Pilih Area", areas, key="stock_tiktokshop_areas"))
-
-    process_disabled = mode == "Stok Area" and (not areas or not chosen_areas)
+    mode, chosen_areas, zero_below, process_disabled = render_stock_controls(
+        area_key_prefix="stock_tiktokshop",
+        pricelist_file=pricelist_file,
+        mode_key="stock_tiktokshop_mode",
+        loaded_areas_key="stock_tiktokshop_areas_loaded",
+        load_button_key="load_area_tiktokshop",
+    )
 
     if st.button("Proses", key="btn_stock_tiktokshop", disabled=process_disabled):
         err = validate_mass_uploads(mass_files)
@@ -1405,13 +1562,56 @@ def render_update_stok_tiktokshop():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, mode, chosen_areas)
+            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, mode, chosen_areas, zero_below)
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
 
     render_cached_summary("stock_tiktokshop")
     render_downloads("stock_tiktokshop")
+
+
+def render_update_stok_bigseller():
+    page_header(
+        "Update Stok Bigseller",
+        "Mengubah stok Bigseller berdasarkan sheet pricelist LAPTOP, TELCO, dan PC HOM ELE. Output hanya baris yang berubah dan otomatis split 10.000 row per file.",
+        [
+            "Mass Update Bigseller (.xlsx, bisa banyak)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+            "Area default Tongle: JKT-3B, JKT-3C, JKT-4B",
+            "Bisa isi rule stok, misalnya stok < 3 jadi 0",
+        ],
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update Bigseller", type=["xlsx"], accept_multiple_files=True, key="stock_bigseller_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl")
+
+    mode, chosen_areas, zero_below, process_disabled = render_stock_controls(
+        area_key_prefix="stock_bigseller",
+        pricelist_file=pricelist_file,
+        mode_key="stock_bigseller_mode",
+        loaded_areas_key="stock_bigseller_areas_loaded",
+        load_button_key="load_area_bigseller",
+    )
+
+    if st.button("Proses", key="btn_stock_bigseller", disabled=process_disabled):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if pricelist_file is None:
+            st.error("Upload Pricelist dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = process_stock_bigseller(mass_files, pricelist_file, mode, chosen_areas, zero_below)
+            cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("stock_bigseller")
+    render_downloads("stock_bigseller")
 
 
 def render_harga_normal_shopee():
@@ -1761,10 +1961,15 @@ def build_menu() -> str:
     elif group == "Update Stok":
         child = st.sidebar.radio(
             "Pilih Platform",
-            ["Shopee (Mall & Star)", "TikTokShop"],
+            ["Shopee (Mall & Star)", "TikTokShop", "Bigseller"],
             key="sidebar_update_stok_menu",
         )
-        route = "update_stok_shopee" if child.startswith("Shopee") else "update_stok_tiktokshop"
+        if child.startswith("Shopee"):
+            route = "update_stok_shopee"
+        elif child == "TikTokShop":
+            route = "update_stok_tiktokshop"
+        else:
+            route = "update_stok_bigseller"
 
     elif group == "Update Harga Normal":
         child = st.sidebar.radio(
@@ -1827,6 +2032,8 @@ def main():
         render_update_stok_shopee()
     elif route == "update_stok_tiktokshop":
         render_update_stok_tiktokshop()
+    elif route == "update_stok_bigseller":
+        render_update_stok_bigseller()
     elif route == "harga_normal_shopee":
         render_harga_normal_shopee()
     elif route == "harga_normal_tiktokshop":
