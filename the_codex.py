@@ -1469,7 +1469,7 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
     default_areas = st.session_state.get(f"{area_key_prefix}_areas", get_default_tongle_areas(areas))
 
     if "Default" in selected_modes:
-        st.caption("Mode Default memakai gudang JKT: 3B, 3C, 4B (JKT-3B, JKT-3C, JKT-4B)")
+        st.caption("Mode Default memakai gudang JKT: 3B, 3C, 4B")
 
     chosen_areas: Set[str] = set()
     if "Stok Area" in selected_modes:
