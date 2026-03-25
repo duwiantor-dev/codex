@@ -17,7 +17,7 @@ APP_TITLE = "The Codex"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
-DEFAULT_TONGLE_AREAS = ["JKT-3B", "JKT-3C", "JKT-4B"]
+DEFAULT_TONGLE_GUDANGS = ["JKT-3B", "JKT-3C", "JKT-4B"]
 STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
@@ -29,9 +29,9 @@ st.set_page_config(page_title=APP_TITLE, layout="wide")
 SESSION_DEFAULTS = {
     "download_cache": {},
     "summary_cache": {},
-    "stock_shopee_areas_loaded": [],
-    "stock_tiktokshop_areas_loaded": [],
-    "stock_bigseller_areas_loaded": [],
+    "stock_shopee_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "stock_tiktokshop_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "stock_bigseller_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
@@ -379,8 +379,8 @@ def build_area_warehouse_meta(
     area_row: int,
     warehouse_row: int,
     start_col: int,
-) -> Dict[int, str]:
-    col_area_wh: Dict[int, str] = {}
+) -> Dict[int, Dict[str, str]]:
+    col_area_wh: Dict[int, Dict[str, str]] = {}
     for c in range(start_col, ws.max_column + 1):
         area_raw = get_cell_or_merged_value(ws, merged_map, area_row, c)
         warehouse_raw = get_cell_or_merged_value(ws, merged_map, warehouse_row, c)
@@ -388,7 +388,11 @@ def build_area_warehouse_meta(
         warehouse_name = su(warehouse_raw)
         if not area_name or not warehouse_name:
             continue
-        col_area_wh[c] = f"{area_name}-{warehouse_name}"
+        col_area_wh[c] = {
+            "area": area_name,
+            "warehouse": warehouse_name,
+            "area_wh": f"{area_name}-{warehouse_name}",
+        }
     return col_area_wh
 
 
@@ -421,7 +425,12 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
     )
 
     sku_map: Dict[str, Dict[str, Any]] = {}
-    area_warehouses: Set[str] = set(col_area_wh.values())
+    area_names: Set[str] = set()
+    area_warehouses: Set[str] = set()
+    for meta in col_area_wh.values():
+        area_names.add(meta["area"])
+        area_warehouses.add(meta["area_wh"])
+
     for r in range(max(header_row, warehouse_row) + 1, ws.max_row + 1):
         sku = s_clean(ws.cell(r, sku_col).value)
         if not sku:
@@ -432,13 +441,17 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
 
         tot_val = to_int_or_none(ws.cell(r, tot_col).value)
         by_area_wh: Dict[str, int] = {}
-        for c, area_wh_name in col_area_wh.items():
+        by_area: Dict[str, int] = {}
+        for c, meta in col_area_wh.items():
             v = to_int_or_none(ws.cell(r, c).value)
             if v is None:
                 continue
+            area_wh_name = meta["area_wh"]
+            area_name = meta["area"]
             by_area_wh[area_wh_name] = by_area_wh.get(area_wh_name, 0) + int(v)
-        sku_map[sku_key] = {"TOT": tot_val, "by_area": by_area_wh}
-    return sku_map, sorted(area_warehouses)
+            by_area[area_name] = by_area.get(area_name, 0) + int(v)
+        sku_map[sku_key] = {"TOT": tot_val, "by_area_wh": by_area_wh, "by_area": by_area}
+    return sku_map, {"area_options": sorted(area_names), "gudang_options": sorted(area_warehouses), "default_gudang_options": sorted(area_warehouses)}
 
 
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
@@ -456,14 +469,22 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
         )
 
     merged_lookup: Dict[str, Dict[str, Any]] = {}
-    areas_all: Set[str] = set()
+    area_options_all: Set[str] = set()
+    gudang_options_all: Set[str] = set()
+    default_gudang_options_all: Set[str] = set()
     for sname in target_sheets:
-        sku_map, areas = build_stock_lookup_from_sheet_fast(wb[sname], sname)
+        sku_map, meta = build_stock_lookup_from_sheet_fast(wb[sname], sname)
         merged_lookup.update(sku_map)
-        areas_all |= set(areas)
+        area_options_all |= set(meta.get("area_options", []))
+        gudang_options_all |= set(meta.get("gudang_options", []))
+        default_gudang_options_all |= set(meta.get("default_gudang_options", []))
     if not merged_lookup:
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
-    return merged_lookup, sorted(areas_all)
+    return merged_lookup, {
+        "area_options": sorted(area_options_all),
+        "gudang_options": sorted(gudang_options_all),
+        "default_gudang_options": sorted(default_gudang_options_all),
+    }
 
 
 def apply_stock_floor_rule(qty: Optional[int], zero_below: int = 0) -> Optional[int]:
@@ -475,9 +496,9 @@ def apply_stock_floor_rule(qty: Optional[int], zero_below: int = 0) -> Optional[
     return qty
 
 
-def get_default_tongle_areas(area_warehouses: List[str]) -> List[str]:
+def get_default_tongle_gudangs(area_warehouses: List[str]) -> List[str]:
     area_wh_set = {su(a) for a in area_warehouses}
-    return [area for area in DEFAULT_TONGLE_AREAS if su(area) in area_wh_set]
+    return [area for area in DEFAULT_TONGLE_GUDANGS if su(area) in area_wh_set]
 
 
 def pick_stock_value(
@@ -485,6 +506,7 @@ def pick_stock_value(
     stock_lookup: Dict[str, Dict],
     selected_modes: Set[str],
     chosen_areas: Set[str],
+    chosen_gudangs: Set[str],
     zero_below: int = 0,
 ) -> Optional[int]:
     base, _ = split_sku_addons(sku_full)
@@ -495,20 +517,34 @@ def pick_stock_value(
     rec = stock_lookup[base_key]
     tot = rec.get("TOT")
     by_area = rec.get("by_area", {}) or {}
+    by_area_wh = rec.get("by_area_wh", {}) or {}
 
     if "Stok Nasional (TOT)" in selected_modes:
         return apply_stock_floor_rule(tot if tot is not None else None, zero_below)
 
-    area_union: Set[str] = set()
+    picked_area_whs: Set[str] = set()
     if "Default" in selected_modes:
-        area_union |= {a for a in DEFAULT_TONGLE_AREAS if a in by_area}
-    if "Stok Area" in selected_modes:
-        area_union |= {a for a in chosen_areas if a in by_area}
+        picked_area_whs |= {a for a in DEFAULT_TONGLE_GUDANGS if a in by_area_wh}
 
-    if not area_union:
+    total = 0
+    counted_area_whs: Set[str] = set()
+
+    if "Area" in selected_modes:
+        for area_name in chosen_areas:
+            total += int(by_area.get(area_name, 0) or 0)
+            counted_area_whs |= {k for k in by_area_wh.keys() if k.startswith(f"{area_name}-")}
+
+    if "Gudang" in selected_modes:
+        picked_area_whs |= {a for a in chosen_gudangs if a in by_area_wh}
+
+    for area_wh in picked_area_whs:
+        if area_wh in counted_area_whs:
+            continue
+        total += int(by_area_wh.get(area_wh, 0) or 0)
+
+    if not selected_modes or total == 0 and not counted_area_whs and not picked_area_whs:
         return None
 
-    total = sum(int(by_area.get(area_name, 0) or 0) for area_name in area_union)
     return apply_stock_floor_rule(total, zero_below)
 
 
@@ -548,7 +584,7 @@ def find_shopee_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -562,7 +598,7 @@ def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str,
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, zero_below)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -590,7 +626,7 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
     return workbook_to_bytes(out_wb)
 
 
-def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], zero_below: int = 0):
+def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -598,7 +634,7 @@ def process_stock_shopee(mass_files: List[Any], pricelist_file: Any, selected_mo
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, zero_below)
+            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             changed_rows_all.extend(rows)
             for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
                 summary[k] += stats[k]
@@ -648,7 +684,7 @@ def find_tiktokshop_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -662,7 +698,7 @@ def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, zero_below)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -690,7 +726,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
-def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], zero_below: int = 0):
+def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -698,7 +734,7 @@ def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, selecte
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, zero_below)
+            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             changed_rows_all.extend(rows)
             for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
                 summary[k] += stats[k]
@@ -725,7 +761,7 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return header_row + 1, found_cols["sku"], found_cols["qty"]
 
 
-def process_stock_bigseller(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], zero_below: int = 0):
+def process_stock_bigseller(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
@@ -770,7 +806,7 @@ def process_stock_bigseller(mass_files: List[Any], pricelist_file: Any, selected
 
                 summary["rows_scanned"] += 1
                 old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, zero_below)
+                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
 
                 if new_qty is None:
                     summary["rows_unmatched"] += 1
@@ -1442,53 +1478,68 @@ def page_header(title: str, desc: str, requirements: List[str]):
 def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: str, loaded_areas_key: str, load_button_key: str):
     selected_modes = set(st.multiselect(
         "Mode Stok",
-        ["Stok Nasional (TOT)", "Default", "Stok Area"],
+        ["Stok Nasional (TOT)", "Default", "Area", "Gudang"],
         default=["Default"],
         key=mode_key,
-        help="Bisa pilih lebih dari 1 mode. Jika pilih TOT bersamaan dengan mode lain, hasil stok akan pakai TOT.",
+        help="Selain Stok Nasional (TOT), mode stok bisa dipilih lebih dari 1. Jika pilih TOT bersamaan dengan mode lain, hasil stok akan pakai TOT.",
     ))
     zero_below = st.number_input("Stok < angka ini jadi 0", min_value=0, value=0, step=1, key=f"{area_key_prefix}_zero_below")
 
-    needs_area_data = bool(selected_modes & {"Default", "Stok Area"})
+    needs_lookup_data = bool(selected_modes & {"Default", "Area", "Gudang"})
 
-    if st.button("Load Data Area", key=load_button_key):
+    if st.button("Load Data Area / Gudang", key=load_button_key):
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
         else:
             try:
-                _, areas = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
-                st.session_state[loaded_areas_key] = areas
-                defaults = get_default_tongle_areas(areas)
-                if defaults:
-                    st.session_state[f"{area_key_prefix}_areas"] = defaults
-                st.success(f"Data area/gudang berhasil dimuat: {len(areas)} opsi")
+                _, meta = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+                st.session_state[loaded_areas_key] = meta
+                default_gudangs = get_default_tongle_gudangs(meta.get("gudang_options", []))
+                if default_gudangs:
+                    st.session_state[f"{area_key_prefix}_gudangs"] = default_gudangs
+                st.success(
+                    f"Data berhasil dimuat: {len(meta.get('area_options', []))} area, {len(meta.get('gudang_options', []))} kombinasi area-gudang"
+                )
             except Exception as e:
-                st.error(f"Gagal load data area: {e}")
+                st.error(f"Gagal load data area / gudang: {e}")
 
-    areas = st.session_state.get(loaded_areas_key, [])
-    default_areas = st.session_state.get(f"{area_key_prefix}_areas", get_default_tongle_areas(areas))
+    meta = st.session_state.get(loaded_areas_key, {}) or {}
+    areas = meta.get("area_options", [])
+    gudangs = meta.get("gudang_options", [])
+    default_gudangs = st.session_state.get(f"{area_key_prefix}_gudangs", get_default_tongle_gudangs(gudangs))
 
     if "Default" in selected_modes:
-        st.caption("Mode Default memakai gudang JKT: 3B, 3C, 4B")
+        st.caption("Mode Default mengunci gudang: JKT-3B, JKT-3C, JKT-4B")
 
     chosen_areas: Set[str] = set()
-    if "Stok Area" in selected_modes:
+    chosen_gudangs: Set[str] = set()
+    if "Area" in selected_modes:
         chosen_areas = set(st.multiselect(
-            "Pilih Area Gudang Tambahan",
+            "Pilih Area",
             areas,
-            default=default_areas,
+            default=st.session_state.get(f"{area_key_prefix}_areas", []),
             key=f"{area_key_prefix}_areas",
+        ))
+
+    if "Gudang" in selected_modes:
+        chosen_gudangs = set(st.multiselect(
+            "Pilih Gudang (format Area-Gudang)",
+            gudangs,
+            default=default_gudangs if "Default" in selected_modes else st.session_state.get(f"{area_key_prefix}_gudangs", []),
+            key=f"{area_key_prefix}_gudangs",
         ))
 
     process_disabled = False
     if not selected_modes:
         process_disabled = True
-    elif needs_area_data and not areas:
+    elif needs_lookup_data and not (areas or gudangs):
         process_disabled = True
-    elif "Stok Area" in selected_modes and not chosen_areas:
+    elif "Area" in selected_modes and not chosen_areas:
+        process_disabled = True
+    elif "Gudang" in selected_modes and not chosen_gudangs:
         process_disabled = True
 
-    return selected_modes, chosen_areas, zero_below, process_disabled
+    return selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled
 
 
 def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
@@ -1538,7 +1589,7 @@ def render_update_stok_shopee():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_shopee_pl")
 
-    selected_modes, chosen_areas, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
         area_key_prefix="stock_shopee",
         pricelist_file=pricelist_file,
         mode_key="stock_shopee_mode",
@@ -1555,7 +1606,7 @@ def render_update_stok_shopee():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, selected_modes, chosen_areas, zero_below)
+            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1579,7 +1630,7 @@ def render_update_stok_tiktokshop():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_tiktokshop_pl")
 
-    selected_modes, chosen_areas, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
         area_key_prefix="stock_tiktokshop",
         pricelist_file=pricelist_file,
         mode_key="stock_tiktokshop_mode",
@@ -1596,7 +1647,7 @@ def render_update_stok_tiktokshop():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, selected_modes, chosen_areas, zero_below)
+            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1620,7 +1671,7 @@ def render_update_stok_bigseller():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl")
 
-    selected_modes, chosen_areas, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
         area_key_prefix="stock_bigseller",
         pricelist_file=pricelist_file,
         mode_key="stock_bigseller_mode",
@@ -1637,7 +1688,7 @@ def render_update_stok_bigseller():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_stock_bigseller(mass_files, pricelist_file, selected_modes, chosen_areas, zero_below)
+            result_bytes, result_name, issues_bytes, summary = process_stock_bigseller(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
