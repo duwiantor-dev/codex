@@ -373,18 +373,26 @@ def find_tot_col(ws: Worksheet, header_row_hint: int) -> Tuple[int, int]:
     raise ValueError("Kolom 'TOT' tidak ketemu.")
 
 
-def build_area_meta(ws: Worksheet, merged_map: Dict[Tuple[int, int], object], area_row: int, start_col: int) -> Dict[int, str]:
-    col_area: Dict[int, str] = {}
+def build_area_warehouse_meta(
+    ws: Worksheet,
+    merged_map: Dict[Tuple[int, int], object],
+    area_row: int,
+    warehouse_row: int,
+    start_col: int,
+) -> Dict[int, str]:
+    col_area_wh: Dict[int, str] = {}
     for c in range(start_col, ws.max_column + 1):
         area_raw = get_cell_or_merged_value(ws, merged_map, area_row, c)
+        warehouse_raw = get_cell_or_merged_value(ws, merged_map, warehouse_row, c)
         area_name = su(area_raw)
-        if area_name:
-            col_area[c] = area_name
-    return col_area
+        warehouse_name = su(warehouse_raw)
+        if not area_name or not warehouse_name:
+            continue
+        col_area_wh[c] = f"{area_name}-{warehouse_name}"
+    return col_area_wh
 
 
 def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
-    area_row = 3
     header_row = find_header_row_by_exact(ws, "KODEBARANG", scan_rows=200)
     if header_row is None:
         header_row = find_header_row_by_exact(ws, "KODE BARANG", scan_rows=200)
@@ -402,11 +410,19 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
 
     header_row_used, tot_col = find_tot_col(ws, header_row)
     merged_map = build_merged_lookup_map(ws)
-    col_area = build_area_meta(ws, merged_map, area_row=area_row, start_col=tot_col + 1)
+    area_row = header_row_used + 1
+    warehouse_row = header_row_used + 2
+    col_area_wh = build_area_warehouse_meta(
+        ws,
+        merged_map,
+        area_row=area_row,
+        warehouse_row=warehouse_row,
+        start_col=tot_col + 1,
+    )
 
     sku_map: Dict[str, Dict[str, Any]] = {}
-    areas: Set[str] = set(col_area.values())
-    for r in range(header_row_used + 1, ws.max_row + 1):
+    area_warehouses: Set[str] = set(col_area_wh.values())
+    for r in range(max(header_row, warehouse_row) + 1, ws.max_row + 1):
         sku = s_clean(ws.cell(r, sku_col).value)
         if not sku:
             continue
@@ -415,14 +431,14 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
             continue
 
         tot_val = to_int_or_none(ws.cell(r, tot_col).value)
-        by_area: Dict[str, int] = {}
-        for c, area_name in col_area.items():
+        by_area_wh: Dict[str, int] = {}
+        for c, area_wh_name in col_area_wh.items():
             v = to_int_or_none(ws.cell(r, c).value)
             if v is None:
                 continue
-            by_area[area_name] = by_area.get(area_name, 0) + int(v)
-        sku_map[sku_key] = {"TOT": tot_val, "by_area": by_area}
-    return sku_map, sorted(areas)
+            by_area_wh[area_wh_name] = by_area_wh.get(area_wh_name, 0) + int(v)
+        sku_map[sku_key] = {"TOT": tot_val, "by_area": by_area_wh}
+    return sku_map, sorted(area_warehouses)
 
 
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
@@ -459,9 +475,9 @@ def apply_stock_floor_rule(qty: Optional[int], zero_below: int = 0) -> Optional[
     return qty
 
 
-def get_default_tongle_areas(areas: List[str]) -> List[str]:
-    area_set = {su(a) for a in areas}
-    return [area for area in DEFAULT_TONGLE_AREAS if su(area) in area_set]
+def get_default_tongle_areas(area_warehouses: List[str]) -> List[str]:
+    area_wh_set = {su(a) for a in area_warehouses}
+    return [area for area in DEFAULT_TONGLE_AREAS if su(area) in area_wh_set]
 
 
 def pick_stock_value(
@@ -1445,7 +1461,7 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
                 defaults = get_default_tongle_areas(areas)
                 if defaults:
                     st.session_state[f"{area_key_prefix}_areas"] = defaults
-                st.success(f"Data area berhasil dimuat: {len(areas)} area")
+                st.success(f"Data area/gudang berhasil dimuat: {len(areas)} opsi")
             except Exception as e:
                 st.error(f"Gagal load data area: {e}")
 
@@ -1453,12 +1469,12 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
     default_areas = st.session_state.get(f"{area_key_prefix}_areas", get_default_tongle_areas(areas))
 
     if "Default" in selected_modes:
-        st.caption("Mode Default memakai area: JKT-3B, JKT-3C, JKT-4B")
+        st.caption("Mode Default memakai gudang JKT: 3B, 3C, 4B (JKT-3B, JKT-3C, JKT-4B)")
 
     chosen_areas: Set[str] = set()
     if "Stok Area" in selected_modes:
         chosen_areas = set(st.multiselect(
-            "Pilih Area Tambahan",
+            "Pilih Area Gudang Tambahan",
             areas,
             default=default_areas,
             key=f"{area_key_prefix}_areas",
