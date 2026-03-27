@@ -1230,7 +1230,7 @@ def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_f
     return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", make_issues_workbook(issues) if issues else None, summary
 
 
-def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1279,8 +1279,6 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
                 output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
                 header_len = ws.max_column
 
-            mp = "M3" if "tiktok" in mf.name.lower() else "M4"
-
             for r in range(header_row + 1, ws.max_row + 1):
                 sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
                 if not sku_full:
@@ -1288,7 +1286,7 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
 
                 summary["rows_scanned"] += 1
                 old_price = parse_price_cell(ws.cell(row=r, column=harga_col).value)
-                new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, mp, discount_rp)
+                new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
 
                 if new_price is None:
                     summary["rows_unmatched"] += 1
@@ -1917,6 +1915,12 @@ def render_harga_normal_bigseller():
     with c3:
         addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_bigseller_add")
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_bigseller_disc")
+    price_key = st.radio(
+        "Ambil harga dari Pricelist",
+        ["M3", "M4"],
+        horizontal=True,
+        key="normal_bigseller_price_key",
+    )
 
     if st.button("Proses", key="btn_normal_bigseller"):
         err = validate_mass_uploads(mass_files)
@@ -1928,7 +1932,7 @@ def render_harga_normal_bigseller():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = process_bigseller(
-                mass_files, pricelist_file, addon_file, discount_rp
+                mass_files, pricelist_file, addon_file, discount_rp, price_key
             )
             cache_downloads("normal_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
