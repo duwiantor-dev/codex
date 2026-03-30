@@ -1507,7 +1507,7 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
     default_gudangs = st.session_state.get(f"{area_key_prefix}_gudangs", get_default_tongle_gudangs(gudangs))
 
     if "Default" in selected_modes:
-        st.caption("Mode Default mengunci gudang: JKT-3B, JKT-3C, JKT-4B")
+        st.caption("Mode Default mengunci gudang: JKT-1A, JKT-3B, JKT-3C, JKT-4B")
 
     chosen_areas: Set[str] = set()
     chosen_gudangs: Set[str] = set()
