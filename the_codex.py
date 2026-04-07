@@ -1012,7 +1012,7 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # ============================================================
 # PRICE PROCESSORS
 # ============================================================
-def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
+def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str, progress_callback=None):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1053,6 +1053,8 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
                 continue
 
             summary["rows_scanned"] += 1
+            if progress_callback:
+                progress_callback(text=f"Memproses {mf.name}... {summary['rows_scanned']} baris")
             old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
             new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
 
@@ -1091,7 +1093,7 @@ def process_shopee_price_files(mass_files: List[Any], pricelist_file: Any, addon
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
-def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1113,6 +1115,8 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
             if not sku_full:
                 continue
             summary["rows_scanned"] += 1
+            if progress_callback:
+                progress_callback(text=f"Memproses {mf.name}... {summary['rows_scanned']} baris")
             old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
             new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M3", discount_rp)
             if new_price is None:
@@ -1140,7 +1144,7 @@ def process_tiktokshop_price_normal(mass_files: List[Any], pricelist_file: Any, 
     return zip_named_files(output_files), "hasil_harga_normal_tiktokshop.zip", make_issues_workbook(issues) if issues else None, summary
 
 
-def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
+def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str, progress_callback=None):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1162,6 +1166,8 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
             if not sku_full:
                 continue
             summary["rows_scanned"] += 1
+            if progress_callback:
+                progress_callback(text=f"Memproses {mf.name}... {summary['rows_scanned']} baris")
             old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
             new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M4", discount_rp)
             if new_price is None:
@@ -1189,7 +1195,7 @@ def process_powemerchant_price_files(mass_files: List[Any], pricelist_file: Any,
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
-def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
+def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True, progress_callback=None):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
@@ -1221,6 +1227,8 @@ def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_f
         if not seller_sku:
             continue
         summary["rows_scanned"] += 1
+        if progress_callback:
+            progress_callback(text=f"Memproses {input_file.name}... {summary['rows_scanned']} baris")
         new_price, reason = compute_price_from_maps(seller_sku, price_map, addon_map, "M3", discount_rp)
         if new_price is None:
             summary["rows_unmatched"] += 1
@@ -1239,7 +1247,7 @@ def process_tiktokshop_price_coret(input_file: Any, pricelist_file: Any, addon_f
     return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", make_issues_workbook(issues) if issues else None, summary
 
 
-def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
+def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, progress_callback=None):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1294,6 +1302,8 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
                     continue
 
                 summary["rows_scanned"] += 1
+                if progress_callback:
+                    progress_callback(text=f"Memproses {mf.name}... {summary['rows_scanned']} baris")
                 old_price = parse_price_cell(ws.cell(row=r, column=harga_col).value)
                 new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
 
@@ -1347,7 +1357,7 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
 # ============================================================
 # SUBMIT CAMPAIGN PROCESSORS
 # ============================================================
-def process_submit_campaign_tiktokshop(mass_files: List[Any]):
+def process_submit_campaign_tiktokshop(mass_files: List[Any], progress_callback=None):
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {
@@ -1387,6 +1397,8 @@ def process_submit_campaign_tiktokshop(mass_files: List[Any]):
                 continue
 
             summary["rows_scanned"] += 1
+            if progress_callback:
+                progress_callback(text=f"Memfilter {mf.name}... {summary['rows_scanned']} baris")
             if "ND-ALL-CAMPAIGN" in su(sku_full):
                 row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
                 filtered_rows_data.append(row_vals)
@@ -1529,6 +1541,52 @@ def run_with_loading(process_fn, loading_text: str = "Memproses..."):
         return result
     finally:
         progress.empty()
+
+
+def make_realtime_progress(total_units: int, loading_text: str = "Memproses..."):
+    progress = st.progress(0, text=loading_text)
+    processed = 0
+    total_units = max(int(total_units or 0), 1)
+
+    def update(step: int = 1, text: Optional[str] = None):
+        nonlocal processed
+        processed = min(total_units, processed + max(int(step or 0), 0))
+        percent = min(99, int(processed * 100 / total_units))
+        progress.progress(percent, text=text or loading_text)
+
+    def finish(text: str = "Selesai"):
+        progress.progress(100, text=text)
+
+    def clear():
+        progress.empty()
+
+    return update, finish, clear
+
+
+def estimate_total_rows_from_files(files: List[Any], start_row: int) -> int:
+    total = 0
+    for f in files or []:
+        try:
+            wb = load_workbook(io.BytesIO(f.getvalue()), read_only=True, data_only=True)
+            ws = wb.worksheets[0]
+            total += max(ws.max_row - start_row + 1, 1)
+            wb.close()
+        except Exception:
+            total += 1
+    return max(total, 1)
+
+
+def estimate_total_rows_from_file(file_obj: Any, start_row: int) -> int:
+    if file_obj is None:
+        return 1
+    try:
+        wb = load_workbook(io.BytesIO(file_obj.getvalue()), read_only=True, data_only=True)
+        ws = wb.worksheets[0]
+        total = max(ws.max_row - start_row + 1, 1)
+        wb.close()
+        return total
+    except Exception:
+        return 1
 
 
 # ============================================================
@@ -1708,16 +1766,18 @@ def render_harga_normal_shopee():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 2)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga normal Shopee...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_price_files(
-                    mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
-                ),
-                "Memproses harga normal Shopee...",
+            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
+                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal", progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("normal_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("normal_shopee")
     render_downloads("normal_shopee")
@@ -1746,16 +1806,18 @@ def render_harga_coret_shopee():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 2)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga coret Shopee...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_price_files(
-                    mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Coret Shopee", "coret"
-                ),
-                "Memproses harga coret Shopee...",
+            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
+                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Coret Shopee", "coret", progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("coret_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("coret_shopee")
     render_downloads("coret_shopee")
@@ -1784,16 +1846,18 @@ def render_harga_normal_tiktokshop():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 6)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga normal TikTokShop...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_price_normal(
-                    mass_files, pricelist_file, addon_file, discount_rp
-                ),
-                "Memproses harga normal TikTokShop...",
+            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_normal(
+                mass_files, pricelist_file, addon_file, discount_rp, progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("normal_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("normal_tiktokshop")
     render_downloads("normal_tiktokshop")
@@ -1818,16 +1882,18 @@ def render_harga_coret_tiktokshop():
         if not input_file or not pricelist_file or not addon_file:
             st.error("Upload semua file yang dibutuhkan dulu.")
             return
+        total_units = estimate_total_rows_from_file(input_file, 6)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga coret TikTokShop...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_price_coret(
-                    input_file, pricelist_file, addon_file, discount_rp, True
-                ),
-                "Memproses harga coret TikTokShop...",
+            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_coret(
+                input_file, pricelist_file, addon_file, discount_rp, True, progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("coret_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("coret_tiktokshop")
     render_downloads("coret_tiktokshop")
@@ -1856,16 +1922,18 @@ def render_harga_normal_powemerchant():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 6)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga normal PowerMerchant...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_powemerchant_price_files(
-                    mass_files, pricelist_file, addon_file, discount_rp, "Harga Normal PowerMerchant"
-                ),
-                "Memproses harga normal PowerMerchant...",
+            result_bytes, result_name, issues_bytes, summary = process_powemerchant_price_files(
+                mass_files, pricelist_file, addon_file, discount_rp, "Harga Normal PowerMerchant", progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("normal_pm", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("normal_pm")
     render_downloads("normal_pm")
@@ -1894,16 +1962,18 @@ def render_harga_coret_powemerchant():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 6)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga coret PowerMerchant...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_powemerchant_price_files(
-                    mass_files, pricelist_file, addon_file, discount_rp, "Harga Coret PowerMerchant"
-                ),
-                "Memproses harga coret PowerMerchant...",
+            result_bytes, result_name, issues_bytes, summary = process_powemerchant_price_files(
+                mass_files, pricelist_file, addon_file, discount_rp, "Harga Coret PowerMerchant", progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("coret_pm", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("coret_pm")
     render_downloads("coret_pm")
@@ -1938,16 +2008,18 @@ def render_harga_normal_bigseller():
         if not pricelist_file or not addon_file:
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
+        total_units = estimate_total_rows_from_files(mass_files, 2)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memproses harga normal Bigseller...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_bigseller(
-                    mass_files, pricelist_file, addon_file, discount_rp, price_key
-                ),
-                "Memproses harga normal Bigseller...",
+            result_bytes, result_name, issues_bytes, summary = process_bigseller(
+                mass_files, pricelist_file, addon_file, discount_rp, price_key, progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads("normal_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("normal_bigseller")
     render_downloads("normal_bigseller")
@@ -1984,11 +2056,13 @@ def render_submit_campaign_tiktokshop():
             st.error(err)
             return
 
+        total_units = estimate_total_rows_from_files(mass_files, 3)
+        progress_update, progress_finish, progress_clear = make_realtime_progress(total_units, "Memfilter template campaign TikTokShop...")
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_submit_campaign_tiktokshop(mass_files=mass_files),
-                "Memfilter template campaign TikTokShop...",
+            result_bytes, result_name, issues_bytes, summary = process_submit_campaign_tiktokshop(
+                mass_files=mass_files, progress_callback=progress_update
             )
+            progress_finish()
             cache_downloads(
                 "submit_campaign_tiktokshop",
                 result_name,
@@ -1998,6 +2072,8 @@ def render_submit_campaign_tiktokshop():
             )
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
+        finally:
+            progress_clear()
 
     render_cached_summary("submit_campaign_tiktokshop")
     render_downloads("submit_campaign_tiktokshop")
