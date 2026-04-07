@@ -22,6 +22,15 @@ STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
+# Global style: blue loading bar
+st.markdown("""
+<style>
+    div.stProgress > div > div > div > div {
+        background-color: #2563eb;
+    }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ============================================================
 # SESSION STATE
@@ -1338,21 +1347,7 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
 # ============================================================
 # SUBMIT CAMPAIGN PROCESSORS
 # ============================================================
-def process_submit_campaign_tiktokshop(
-    mass_files: List[Any],
-    pricelist_file: Any,
-    addon_file: Any,
-    discount_rp: int,
-    price_key: str,
-):
-    price_map = load_pricelist_price_map_multisheet(
-        pricelist_file.getvalue(),
-        ["M3", "M4"],
-        start_sheet="LAPTOP",
-        end_sheet="TELCO",
-    )
-    addon_map = load_addon_map_generic(addon_file.getvalue())
-
+def process_submit_campaign_tiktokshop(mass_files: List[Any]):
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {
@@ -1376,21 +1371,15 @@ def process_submit_campaign_tiktokshop(
             "Seller SKU",
             "SKU Penjual",
         ])
-        price_col = get_header_col_fuzzy(src_ws, header_row, [
-            "Campaign price",
-            "Campaign Price",
-            "Harga Campaign",
-            "Harga Promo",
-        ])
 
-        if sku_col is None or price_col is None:
+        if sku_col is None:
             issues.append({
                 "file": mf.name,
-                "reason": "Header Submit Campaign tidak sesuai. Pastikan row 2 berisi header SKU dan Campaign price.",
+                "reason": "Header Submit Campaign tidak sesuai. Pastikan row 2 berisi header SKU Name.",
             })
             continue
 
-        changed_rows_data: List[List[Any]] = []
+        filtered_rows_data: List[List[Any]] = []
 
         for r in range(data_start, src_ws.max_row + 1):
             sku_full = s_clean(src_ws.cell(row=r, column=sku_col).value)
@@ -1398,31 +1387,12 @@ def process_submit_campaign_tiktokshop(
                 continue
 
             summary["rows_scanned"] += 1
-            old_price = parse_price_cell(src_ws.cell(row=r, column=price_col).value)
-            new_price, reason = compute_price_from_maps(
-                sku_full, price_map, addon_map, price_key, discount_rp
-            )
-
-            if new_price is None:
+            if "ND-ALL-CAMPAIGN" in su(sku_full):
+                row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
+                filtered_rows_data.append(row_vals)
+                summary["rows_written"] += 1
+            else:
                 summary["rows_unmatched"] += 1
-                issues.append({
-                    "file": mf.name,
-                    "row": r,
-                    "sku_full": sku_full,
-                    "old_value": old_price,
-                    "new_value": "",
-                    "reason": reason,
-                })
-                continue
-
-            if old_price is not None and int(old_price) == int(new_price):
-                continue
-
-            row_vals = [src_ws.cell(row=r, column=c).value for c in range(1, src_ws.max_column + 1)]
-            if price_col - 1 < len(row_vals):
-                row_vals[price_col - 1] = int(new_price)
-            changed_rows_data.append(row_vals)
-            summary["rows_written"] += 1
 
         out_wb = Workbook()
         out_ws = out_wb.active
@@ -1432,14 +1402,14 @@ def process_submit_campaign_tiktokshop(
             out_ws.cell(row=1, column=c, value=src_ws.cell(row=1, column=c).value)
             out_ws.cell(row=2, column=c, value=src_ws.cell(row=2, column=c).value)
 
-        if changed_rows_data:
-            for out_r, row_vals in enumerate(changed_rows_data, start=data_start):
+        if filtered_rows_data:
+            for out_r, row_vals in enumerate(filtered_rows_data, start=data_start):
                 for c, val in enumerate(row_vals, start=1):
                     out_ws.cell(row=out_r, column=c, value=val)
         else:
             issues.append({
                 "file": mf.name,
-                "reason": "Tidak ada baris berubah pada file ini.",
+                "reason": "Tidak ada baris dengan SKU Name yang mengandung 'ND-ALL-CAMPAIGN'.",
             })
 
         output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(out_wb)))
@@ -1550,6 +1520,17 @@ def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
     return None
 
 
+def run_with_loading(process_fn, loading_text: str = "Memproses..."):
+    progress = st.progress(0, text=loading_text)
+    try:
+        progress.progress(20, text=loading_text)
+        result = process_fn()
+        progress.progress(100, text="Selesai")
+        return result
+    finally:
+        progress.empty()
+
+
 # ============================================================
 # PAGES
 # ============================================================
@@ -1604,7 +1585,10 @@ def render_update_stok_shopee():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_shopee(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            result_bytes, issues_bytes, summary = run_with_loading(
+                lambda: process_stock_shopee(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                "Memproses update stok Shopee...",
+            )
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1645,7 +1629,10 @@ def render_update_stok_tiktokshop():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = process_stock_tiktokshop(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            result_bytes, issues_bytes, summary = run_with_loading(
+                lambda: process_stock_tiktokshop(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                "Memproses update stok TikTokShop...",
+            )
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1686,7 +1673,10 @@ def render_update_stok_bigseller():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_stock_bigseller(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_stock_bigseller(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                "Memproses update stok Bigseller...",
+            )
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
             st.error(f"Gagal memproses: {e}")
@@ -1719,8 +1709,11 @@ def render_harga_normal_shopee():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
-                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_shopee_price_files(
+                    mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Normal Shopee", "normal"
+                ),
+                "Memproses harga normal Shopee...",
             )
             cache_downloads("normal_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1754,8 +1747,11 @@ def render_harga_coret_shopee():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_shopee_price_files(
-                mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Coret Shopee", "coret"
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_shopee_price_files(
+                    mass_files, pricelist_file, addon_file, discount_rp, "M4", "Harga Coret Shopee", "coret"
+                ),
+                "Memproses harga coret Shopee...",
             )
             cache_downloads("coret_shopee", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1789,8 +1785,11 @@ def render_harga_normal_tiktokshop():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_normal(
-                mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_tiktokshop_price_normal(
+                    mass_files, pricelist_file, addon_file, discount_rp
+                ),
+                "Memproses harga normal TikTokShop...",
             )
             cache_downloads("normal_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1820,8 +1819,11 @@ def render_harga_coret_tiktokshop():
             st.error("Upload semua file yang dibutuhkan dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_tiktokshop_price_coret(
-                input_file, pricelist_file, addon_file, discount_rp, True
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_tiktokshop_price_coret(
+                    input_file, pricelist_file, addon_file, discount_rp, True
+                ),
+                "Memproses harga coret TikTokShop...",
             )
             cache_downloads("coret_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1855,8 +1857,11 @@ def render_harga_normal_powemerchant():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_powemerchant_price_files(
-                mass_files, pricelist_file, addon_file, discount_rp, "Harga Normal PowerMerchant"
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_powemerchant_price_files(
+                    mass_files, pricelist_file, addon_file, discount_rp, "Harga Normal PowerMerchant"
+                ),
+                "Memproses harga normal PowerMerchant...",
             )
             cache_downloads("normal_pm", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1890,8 +1895,11 @@ def render_harga_coret_powemerchant():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_powemerchant_price_files(
-                mass_files, pricelist_file, addon_file, discount_rp, "Harga Coret PowerMerchant"
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_powemerchant_price_files(
+                    mass_files, pricelist_file, addon_file, discount_rp, "Harga Coret PowerMerchant"
+                ),
+                "Memproses harga coret PowerMerchant...",
             )
             cache_downloads("coret_pm", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1931,8 +1939,11 @@ def render_harga_normal_bigseller():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = process_bigseller(
-                mass_files, pricelist_file, addon_file, discount_rp, price_key
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_bigseller(
+                    mass_files, pricelist_file, addon_file, discount_rp, price_key
+                ),
+                "Memproses harga normal Bigseller...",
             )
             cache_downloads("normal_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
         except Exception as e:
@@ -1954,48 +1965,17 @@ def render_submit_campaign_shopee():
 def render_submit_campaign_tiktokshop():
     page_header(
         "Submit Campaign TikTokShop",
-        "Memproses file submit campaign TikTokShop. Output hanya mengambil row yang berubah.",
+        "Cukup upload template campaign TikTokShop. Sistem hanya akan menyimpan baris yang memiliki karakter 'ND-ALL-CAMPAIGN' pada kolom SKU Name.",
         [
             "Template Campaign Tiktokshop (.xlsx)",
-            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
-            "Addon Mapping (.xlsx)",
         ],
     )
 
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        mass_files = st.file_uploader(
-            "Upload Template Campaign Tiktokshop",
-            type=["xlsx"],
-            accept_multiple_files=True,
-            key="submit_campaign_tiktokshop_mass",
-        )
-    with c2:
-        pricelist_file = st.file_uploader(
-            "Upload Pricelist",
-            type=["xlsx"],
-            key="submit_campaign_tiktokshop_pl",
-        )
-    with c3:
-        addon_file = st.file_uploader(
-            "Upload Addon Mapping",
-            type=["xlsx"],
-            key="submit_campaign_tiktokshop_add",
-        )
-
-    discount_rp = st.number_input(
-        "Diskon (Rp)",
-        min_value=0,
-        value=0,
-        step=1000,
-        key="submit_campaign_tiktokshop_disc",
-    )
-
-    price_key = st.radio(
-        "Ambil harga dari Pricelist",
-        ["M3", "M4"],
-        horizontal=True,
-        key="submit_campaign_tiktokshop_price_key",
+    mass_files = st.file_uploader(
+        "Upload Template Campaign Tiktokshop",
+        type=["xlsx"],
+        accept_multiple_files=True,
+        key="submit_campaign_tiktokshop_mass",
     )
 
     if st.button("Proses", key="btn_submit_campaign_tiktokshop"):
@@ -2004,17 +1984,10 @@ def render_submit_campaign_tiktokshop():
             st.error(err)
             return
 
-        if not pricelist_file or not addon_file:
-            st.error("Upload Pricelist dan Addon Mapping dulu.")
-            return
-
         try:
-            result_bytes, result_name, issues_bytes, summary = process_submit_campaign_tiktokshop(
-                mass_files=mass_files,
-                pricelist_file=pricelist_file,
-                addon_file=addon_file,
-                discount_rp=discount_rp,
-                price_key=price_key,
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_submit_campaign_tiktokshop(mass_files=mass_files),
+                "Memfilter template campaign TikTokShop...",
             )
             cache_downloads(
                 "submit_campaign_tiktokshop",
