@@ -741,7 +741,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
 def write_stock_blibli_output(template_bytes: bytes, changed_rows_all: List[List[Any]]) -> bytes:
     out_wb = load_workbook(io.BytesIO(template_bytes))
     out_ws = get_first_sheet(out_wb)
-    data_start, _, _, _, _ = find_blibli_columns(out_ws)
+    data_start, _, _ = find_blibli_stock_columns(out_ws)
     if out_ws.max_row >= data_start:
         out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
     for idx, row_vals in enumerate(changed_rows_all, start=data_start):
@@ -753,7 +753,7 @@ def write_stock_blibli_output(template_bytes: bytes, changed_rows_all: List[List
 def write_stock_akulaku_output(template_bytes: bytes, changed_rows_all: List[List[Any]]) -> bytes:
     out_wb = load_workbook(io.BytesIO(template_bytes))
     out_ws = get_first_sheet(out_wb)
-    data_start, _, _, _ = find_akulaku_columns(out_ws)
+    data_start, _, _ = find_akulaku_stock_columns(out_ws)
     if out_ws.max_row >= data_start:
         out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
     for idx, row_vals in enumerate(changed_rows_all, start=data_start):
@@ -1400,39 +1400,69 @@ def find_blibli_header_col_contains(ws: Worksheet, header_row: int, candidates: 
     return None
 
 
-def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
+def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     header_row = 1
     data_start = 5
-    sku_col = find_blibli_header_col_contains(ws, header_row, ["Seller SKU", "SellerSKU", "SKU Seller"])
-    stok_col = find_blibli_header_col_contains(ws, header_row, ["Stok", "Stock"])
-    harga_col = find_blibli_header_col_contains(ws, header_row, ["Harga (Rp)", "Harga Rp", "Harga"])
-    harga_jual_col = find_blibli_header_col_contains(ws, header_row, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
+    sku_candidates = [
+        "Seller SKU", "SellerSKU", "SKU Seller", "Seller SKU Code", "Merchant SKU",
+        "Seller Item SKU", "SKU", "Kode SKU", "Kode Seller SKU"
+    ]
+    stok_candidates = ["Stok", "Stock", "Jumlah Stok", "Stock Qty", "Qty", "Quantity"]
+
+    sku_col = find_blibli_header_col_contains(ws, header_row, sku_candidates)
+    stok_col = find_blibli_header_col_contains(ws, header_row, stok_candidates)
 
     if sku_col is None:
-        raise ValueError("Kolom 'Seller SKU' tidak ketemu pada template Blibli.")
-    if harga_col is None:
-        raise ValueError("Kolom 'Harga (Rp)' tidak ketemu pada template Blibli.")
-    if harga_jual_col is None:
-        raise ValueError("Kolom 'Harga Penjualan (Rp)' tidak ketemu pada template Blibli.")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom SKU Blibli tidak ketemu pada row 1. Header terbaca: {headers}")
     if stok_col is None:
-        raise ValueError("Kolom 'Stok' tidak ketemu pada template Blibli.")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom Stok Blibli tidak ketemu pada row 1. Header terbaca: {headers}")
+
+    return data_start, sku_col, stok_col
+
+
+def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
+    header_row = 1
+    data_start, sku_col, stok_col = find_blibli_stock_columns(ws)
+    harga_col = find_blibli_header_col_contains(ws, header_row, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual", "Selling Price", "Harga"])
+    harga_jual_col = find_blibli_header_col_contains(ws, header_row, ["Harga (Rp)", "Harga Rp", "Harga Dasar", "Normal Price", "Harga"])
+
+    if harga_col is None:
+        raise ValueError("Kolom 'Harga (Rp)' / harga Blibli tidak ketemu pada template.")
+    if harga_jual_col is None:
+        raise ValueError("Kolom 'Harga Penjualan (Rp)' / harga jual Blibli tidak ketemu pada template.")
 
     return data_start, sku_col, harga_col, harga_jual_col, stok_col
 
 
-def find_akulaku_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
+def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     header_row = 1
     data_start = 2
-    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Produk"])
-    harga_col = get_header_col_fuzzy(ws, header_row, ["Harga"])
-    stok_col = get_header_col_fuzzy(ws, header_row, ["Stok"])
+    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Produk", "SKU", "Seller SKU", "SKU Penjual", "Merchant SKU"])
+    stok_col = get_header_col_fuzzy(ws, header_row, ["Stok", "Stock", "Qty", "Quantity", "Jumlah Stok"])
 
     if sku_col is None:
-        raise ValueError("Kolom 'SKU Produk' tidak ketemu pada template Akulaku.")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom SKU Akulaku tidak ketemu pada row 1. Header terbaca: {headers}")
+    if stok_col is None:
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom Stok Akulaku tidak ketemu pada row 1. Header terbaca: {headers}")
+
+    return data_start, sku_col, stok_col
+
+
+def find_akulaku_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
+    header_row = 1
+    data_start, sku_col, stok_col = find_akulaku_stock_columns(ws)
+    harga_col = get_header_col_fuzzy(ws, header_row, ["Harga", "Price", "Harga Jual", "Selling Price"])
+
     if harga_col is None:
         raise ValueError("Kolom 'Harga' tidak ketemu pada template Akulaku.")
-    if stok_col is None:
-        raise ValueError("Kolom 'Stok' tidak ketemu pada template Akulaku.")
 
     return data_start, sku_col, harga_col, stok_col
 
@@ -1518,7 +1548,7 @@ def collect_changed_rows_stock_akulaku(
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
     ws = wb[wb.sheetnames[0]]
-    data_start, sku_col, _, stok_col = find_akulaku_columns(ws)
+    data_start, sku_col, stok_col = find_akulaku_stock_columns(ws)
 
     for row in ws.iter_rows(min_row=data_start, values_only=True):
         row_list = list(row)
