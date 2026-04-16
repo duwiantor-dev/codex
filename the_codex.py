@@ -13,7 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "Codex id v8.1 stable"
+APP_TITLE = "Codexid"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
@@ -1364,14 +1364,27 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
 # BLIBLI / AKULAKU PARSERS
 # ============================================================
 def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
-    header_row = 1
-    data_start = 5
-    sku_col = get_header_col_fuzzy(ws, header_row, ["Seller SKU"])
-    harga_col = get_header_col_fuzzy(ws, header_row, ["Harga (Rp)", "Harga Rp", "Harga"])
-    harga_jual_col = get_header_col_fuzzy(ws, header_row, ["Harga Penjualan (Rp)", "Harga Penjualan"])
-    stok_col = get_header_col_fuzzy(ws, header_row, ["Stok"])
+    header_row = None
+    sku_col = None
+    harga_col = None
+    harga_jual_col = None
+    stok_col = None
 
-    if sku_col is None:
+    for r in range(1, min(8, ws.max_row) + 1):
+        sku_col_try = get_header_col_fuzzy(ws, r, ["Seller SKU", "SellerSKU", "SKU Seller"])
+        stok_col_try = get_header_col_fuzzy(ws, r, ["Stok", "Stock"])
+        harga_col_try = get_header_col_fuzzy(ws, r, ["Harga (Rp)", "Harga Rp", "Harga"])
+        harga_jual_col_try = get_header_col_fuzzy(ws, r, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
+
+        if sku_col_try is not None and stok_col_try is not None:
+            header_row = r
+            sku_col = sku_col_try
+            harga_col = harga_col_try
+            harga_jual_col = harga_jual_col_try
+            stok_col = stok_col_try
+            break
+
+    if header_row is None or sku_col is None:
         raise ValueError("Kolom 'Seller SKU' tidak ketemu pada template Blibli.")
     if harga_col is None:
         raise ValueError("Kolom 'Harga (Rp)' tidak ketemu pada template Blibli.")
@@ -1380,6 +1393,7 @@ def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
     if stok_col is None:
         raise ValueError("Kolom 'Stok' tidak ketemu pada template Blibli.")
 
+    data_start = max(5, header_row + 4)
     return data_start, sku_col, harga_col, harga_jual_col, stok_col
 
 
