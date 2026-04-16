@@ -738,6 +738,30 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
+def write_stock_blibli_output(template_bytes: bytes, changed_rows_all: List[List[Any]]) -> bytes:
+    out_wb = load_workbook(io.BytesIO(template_bytes))
+    out_ws = get_first_sheet(out_wb)
+    data_start, _, _, _, _ = find_blibli_columns(out_ws)
+    if out_ws.max_row >= data_start:
+        out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
+    for idx, row_vals in enumerate(changed_rows_all, start=data_start):
+        for c, val in enumerate(row_vals, start=1):
+            out_ws.cell(idx, c).value = val
+    return workbook_to_bytes(out_wb)
+
+
+def write_stock_akulaku_output(template_bytes: bytes, changed_rows_all: List[List[Any]]) -> bytes:
+    out_wb = load_workbook(io.BytesIO(template_bytes))
+    out_ws = get_first_sheet(out_wb)
+    data_start, _, _, _ = find_akulaku_columns(out_ws)
+    if out_ws.max_row >= data_start:
+        out_ws.delete_rows(data_start, out_ws.max_row - data_start + 1)
+    for idx, row_vals in enumerate(changed_rows_all, start=data_start):
+        for c, val in enumerate(row_vals, start=1):
+            out_ws.cell(idx, c).value = val
+    return workbook_to_bytes(out_wb)
+
+
 def process_stock_tiktokshop(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
@@ -1377,27 +1401,14 @@ def find_blibli_header_col_contains(ws: Worksheet, header_row: int, candidates: 
 
 
 def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
-    header_row = None
-    sku_col = None
-    harga_col = None
-    harga_jual_col = None
-    stok_col = None
+    header_row = 1
+    data_start = 5
+    sku_col = find_blibli_header_col_contains(ws, header_row, ["Seller SKU", "SellerSKU", "SKU Seller"])
+    stok_col = find_blibli_header_col_contains(ws, header_row, ["Stok", "Stock"])
+    harga_col = find_blibli_header_col_contains(ws, header_row, ["Harga (Rp)", "Harga Rp", "Harga"])
+    harga_jual_col = find_blibli_header_col_contains(ws, header_row, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
 
-    for r in range(1, min(10, ws.max_row) + 1):
-        sku_col_try = find_blibli_header_col_contains(ws, r, ["Seller SKU", "SellerSKU", "SKU Seller"])
-        stok_col_try = find_blibli_header_col_contains(ws, r, ["Stok", "Stock"])
-        harga_col_try = find_blibli_header_col_contains(ws, r, ["Harga (Rp)", "Harga Rp", "Harga"])
-        harga_jual_col_try = find_blibli_header_col_contains(ws, r, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
-
-        if sku_col_try is not None and stok_col_try is not None:
-            header_row = r
-            sku_col = sku_col_try
-            harga_col = harga_col_try
-            harga_jual_col = harga_jual_col_try
-            stok_col = stok_col_try
-            break
-
-    if header_row is None or sku_col is None:
+    if sku_col is None:
         raise ValueError("Kolom 'Seller SKU' tidak ketemu pada template Blibli.")
     if harga_col is None:
         raise ValueError("Kolom 'Harga (Rp)' tidak ketemu pada template Blibli.")
@@ -1406,7 +1417,6 @@ def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
     if stok_col is None:
         raise ValueError("Kolom 'Stok' tidak ketemu pada template Blibli.")
 
-    data_start = max(5, header_row + 4)
     return data_start, sku_col, harga_col, harga_jual_col, stok_col
 
 
@@ -1491,7 +1501,7 @@ def process_stock_blibli(
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
-    result_bytes = write_changed_rows_keep_header(mass_files[0].getvalue(), changed_rows_all, 1, 5)
+    result_bytes = write_stock_blibli_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
     return result_bytes, make_issues_workbook(issues) if issues else None, summary
 
@@ -1560,7 +1570,7 @@ def process_stock_akulaku(
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
-    result_bytes = write_changed_rows_keep_header(mass_files[0].getvalue(), changed_rows_all, 1, 2)
+    result_bytes = write_stock_akulaku_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
     return result_bytes, make_issues_workbook(issues) if issues else None, summary
 
