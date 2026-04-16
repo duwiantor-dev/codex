@@ -1363,6 +1363,19 @@ def process_bigseller(mass_files: List[Any], pricelist_file: Any, addon_file: An
 # ============================================================
 # BLIBLI / AKULAKU PARSERS
 # ============================================================
+def find_blibli_header_col_contains(ws: Worksheet, header_row: int, candidates: List[str]) -> Optional[int]:
+    normalized_candidates = [re.sub(r"[^a-z0-9]", "", s_clean(c).lower()) for c in candidates if s_clean(c)]
+    for c in range(1, ws.max_column + 1):
+        cell_val = ws.cell(row=header_row, column=c).value
+        cell_norm = re.sub(r"[^a-z0-9]", "", s_clean(cell_val).lower())
+        if not cell_norm:
+            continue
+        for cand in normalized_candidates:
+            if cand and cand in cell_norm:
+                return c
+    return None
+
+
 def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
     header_row = None
     sku_col = None
@@ -1370,11 +1383,11 @@ def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
     harga_jual_col = None
     stok_col = None
 
-    for r in range(1, min(8, ws.max_row) + 1):
-        sku_col_try = get_header_col_fuzzy(ws, r, ["Seller SKU", "SellerSKU", "SKU Seller"])
-        stok_col_try = get_header_col_fuzzy(ws, r, ["Stok", "Stock"])
-        harga_col_try = get_header_col_fuzzy(ws, r, ["Harga (Rp)", "Harga Rp", "Harga"])
-        harga_jual_col_try = get_header_col_fuzzy(ws, r, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
+    for r in range(1, min(10, ws.max_row) + 1):
+        sku_col_try = find_blibli_header_col_contains(ws, r, ["Seller SKU", "SellerSKU", "SKU Seller"])
+        stok_col_try = find_blibli_header_col_contains(ws, r, ["Stok", "Stock"])
+        harga_col_try = find_blibli_header_col_contains(ws, r, ["Harga (Rp)", "Harga Rp", "Harga"])
+        harga_jual_col_try = find_blibli_header_col_contains(ws, r, ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual"])
 
         if sku_col_try is not None and stok_col_try is not None:
             header_row = r
