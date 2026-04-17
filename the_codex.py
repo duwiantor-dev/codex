@@ -1830,7 +1830,6 @@ def render_redwood_app():
     """Embedded processor: Analisa Penjualan"""
     import io
     import re
-    from dataclasses import dataclass
     from datetime import date, timedelta
     from typing import Optional, Tuple, Dict, List
 
@@ -2064,13 +2063,6 @@ def render_redwood_app():
         return "pos" if g >= 0 else "neg"
 
 
-    @dataclass
-    class CleanData:
-        df: pd.DataFrame
-        date_min: date
-        date_max: date
-
-
     @st.cache_data(show_spinner=False)
     def read_excel_cached(file_bytes: bytes, sheet_name: str, header_row_1based: int) -> pd.DataFrame:
         bio = io.BytesIO(file_bytes)
@@ -2081,7 +2073,7 @@ def render_redwood_app():
 
 
     @st.cache_data(show_spinner=False)
-    def clean_sales_df_cached(df_raw: pd.DataFrame) -> CleanData:
+    def clean_sales_df_cached(df_raw: pd.DataFrame):
         df = normalize_columns(df_raw)
         ok, msg = ensure_required_columns(df)
         if not ok:
@@ -2122,7 +2114,7 @@ def render_redwood_app():
         df["PLATFORM"] = df["NAMA CUSTOMER"].astype(str).str.strip()
 
         df = df[df["STATUS"].str.strip().ne("")].copy()
-        return CleanData(df=df, date_min=df["TGL"].min(), date_max=df["TGL"].max())
+        return df, df["TGL"].min(), df["TGL"].max()
 
 
     @st.cache_data(show_spinner=False)
@@ -2432,8 +2424,8 @@ def render_redwood_app():
             a = clean_sales_df_cached(df_a_raw)
             b = clean_sales_df_cached(df_b_raw)
 
-        df_a = a.df
-        df_b = b.df
+        df_a = a_df
+        df_b = b_df
         df_all = pd.concat([df_a, df_b], ignore_index=True)
 
         with control_col:
