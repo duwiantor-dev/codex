@@ -2500,8 +2500,7 @@ def render_redwood_app():
         qty_g = safe_growth_pct(k_this["qty"], k_last["qty"])
         aov_g = safe_growth_pct(k_this["aov"], k_last["aov"]) if (not pd.isna(k_this["aov"]) and not pd.isna(k_last["aov"])) else None
 
-        with main_col:
-            st.subheader("Ringkasan Periode")
+        st.subheader("Ringkasan Periode")
         c1, c2, c3, c4 = st.columns(4)
 
 
