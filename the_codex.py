@@ -18,7 +18,7 @@ MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
 DEFAULT_TONGLE_GUDANGS = ["JKT-1A", "JKT-3B", "JKT-3C", "JKT-4B"]
-STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE"]
+STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE", "SOF COM SUP", "ACC"]
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -1061,7 +1061,7 @@ def load_pricelist_price_map_multisheet(
     pl_bytes: bytes,
     needed_cols: List[str],
     start_sheet: str = "LAPTOP",
-    end_sheet: str = "TELCO",
+    end_sheet: str = "ACC",
 ) -> Dict[str, Dict[str, int]]:
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
 
@@ -1122,8 +1122,8 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
             return None, f"Addon '{code}' tidak ada di file Addon Mapping"
         addon_total += int(addon_map.get(code, 0))
     final_price = int(base_price) + addon_total - int(discount_rp)
-    if final_price < 0:
-        final_price = 0
+    if final_price <= 0:
+        return None, f"Harga hasil {price_key} <= 0 untuk SKU '{base_sku}'"
     return final_price, f"{price_key} + addon - diskon"
 
 
@@ -1131,7 +1131,7 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # PRICE PROCESSORS
 # ============================================================
 def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1227,7 +1227,7 @@ def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file:
 
 
 def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1276,7 +1276,7 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
 
 
 def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1335,7 +1335,7 @@ def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon
 
 
 def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
@@ -1453,7 +1453,7 @@ def find_blibli_price_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
 
 
 def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1511,7 +1511,7 @@ def find_akulaku_price_columns(ws: Worksheet) -> Tuple[int, int, int]:
 
 
 def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1573,7 +1573,7 @@ def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_fi
 
 
 def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
     ws_in = wb_in.active
