@@ -1851,11 +1851,11 @@ def render_redwood_app():
     st.markdown(
         """
     <style>
-    .block-container { padding-top: 0.6rem; padding-bottom: 1.2rem; }
+    .block-container { padding-top: 0.25rem; padding-bottom: 1rem; }
     section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
 
     /* Header (large -> small) */
-    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.2rem 0 0.8rem 0; }
+    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.05rem 0 0.6rem 0; }
     .header-title { font-size: 22px; font-weight: 900; margin:0; line-height:1.1; color: #111827; }
 
     /* Make section headers smaller */
@@ -1973,7 +1973,7 @@ def render_redwood_app():
 
     def parse_tgl(df: pd.DataFrame, col: str = "TGL") -> pd.Series:
         s = df[col]
-        if np.issubdtype(s.dtype, np.datetime64):
+        if pd.api.types.is_datetime64_any_dtype(s):
             return pd.to_datetime(s, errors="coerce").dt.date
         parsed = pd.to_datetime(s, errors="coerce", dayfirst=True)
         return parsed.dt.date
@@ -2436,7 +2436,7 @@ def render_redwood_app():
         df_b = b.df
         df_all = pd.concat([df_a, df_b], ignore_index=True)
 
-        with st.sidebar:
+        with control_col:
             st.markdown("---")
             st.subheader("Mode Perbandingan")
             compare_mode = st.selectbox("Pilih periode", ["MOM", "WOW", "MTD", "UPLOAD"], 0)
