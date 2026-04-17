@@ -1091,6 +1091,11 @@ def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, add
     return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
+
+# PRICE PROCESSORS - GROUPED BY TYPE
+# ============================================================
+# Normal Price
 def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
     return _process_shopee_price_common(
         mass_files,
@@ -1100,18 +1105,6 @@ def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file:
         "M4",
         "Harga Normal Shopee",
         "normal",
-    )
-
-
-def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    return _process_shopee_price_common(
-        mass_files,
-        pricelist_file,
-        addon_file,
-        discount_rp,
-        "M4",
-        "Harga Coret Shopee",
-        "coret",
     )
 
 
@@ -1223,66 +1216,6 @@ def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon
     )
 
 
-def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
-    return _process_powemerchant_price_common(
-        mass_files,
-        pricelist_file,
-        addon_file,
-        discount_rp,
-        "Harga Coret PowerMerchant",
-    )
-
-
-def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
-    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
-    wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
-    ws_in = wb_in.active
-
-    out_wb = Workbook()
-    ws_out = out_wb.active
-    ws_out.title = "Sheet1"
-    headers = [
-        "Product_id (wajib)",
-        "SKU_id (wajib)",
-        "Harga Penawaran (wajib)",
-        "Total Stok Promosi (opsional)\n1. Total Stok Promosi≤ Stok \n2. Jika tidak diisi artinya tidak terbatas",
-        "Batas Pembelian (opsional)\n1. 1 ≤ Batas pembelian≤ 99\n2. Jika tidak diisi artinya tidak terbatas",
-    ]
-    for i, h in enumerate(headers, start=1):
-        ws_out.cell(row=1, column=i).value = h
-
-    issues: List[Dict[str, Any]] = []
-    summary = {"files_total": 1, "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
-    row_out = 2
-
-    for r in range(6, ws_in.max_row + 1):
-        product_id = parse_number_like_id(ws_in.cell(row=r, column=1).value)
-        sku_id = parse_number_like_id(ws_in.cell(row=r, column=4).value)
-        old_price = parse_price_cell(ws_in.cell(row=r, column=6).value)
-        stock = to_int_or_none(ws_in.cell(row=r, column=7).value)
-        seller_sku = s_clean(ws_in.cell(row=r, column=8).value or ws_in.cell(row=r, column=5).value)
-        if not seller_sku:
-            continue
-        summary["rows_scanned"] += 1
-        new_price, reason = compute_price_from_maps(seller_sku, price_map, addon_map, "M3", discount_rp)
-        if new_price is None:
-            summary["rows_unmatched"] += 1
-            issues.append({"file": input_file.name, "row": r, "sku_full": seller_sku, "old_value": old_price, "new_value": "", "reason": reason})
-            continue
-        if only_changed and old_price is not None and int(old_price) == int(new_price):
-            continue
-        ws_out.cell(row=row_out, column=1).value = product_id
-        ws_out.cell(row=row_out, column=2).value = sku_id
-        ws_out.cell(row=row_out, column=3).value = new_price
-        ws_out.cell(row=row_out, column=4).value = stock if stock is not None else ""
-        row_out += 1
-        summary["rows_written"] += 1
-
-    summary["issues_count"] = len(issues)
-    return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", make_issues_workbook(issues) if issues else None, summary
-
-
 def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
     price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
@@ -1391,6 +1324,82 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
 # ============================================================
 # SUBMIT CAMPAIGN PROCESSORS
 # ============================================================
+
+# Discount Price
+def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    return _process_shopee_price_common(
+        mass_files,
+        pricelist_file,
+        addon_file,
+        discount_rp,
+        "M4",
+        "Harga Coret Shopee",
+        "coret",
+    )
+
+
+def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
+    wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
+    ws_in = wb_in.active
+
+    out_wb = Workbook()
+    ws_out = out_wb.active
+    ws_out.title = "Sheet1"
+    headers = [
+        "Product_id (wajib)",
+        "SKU_id (wajib)",
+        "Harga Penawaran (wajib)",
+        "Total Stok Promosi (opsional)\n1. Total Stok Promosi≤ Stok \n2. Jika tidak diisi artinya tidak terbatas",
+        "Batas Pembelian (opsional)\n1. 1 ≤ Batas pembelian≤ 99\n2. Jika tidak diisi artinya tidak terbatas",
+    ]
+    for i, h in enumerate(headers, start=1):
+        ws_out.cell(row=1, column=i).value = h
+
+    issues: List[Dict[str, Any]] = []
+    summary = {"files_total": 1, "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    row_out = 2
+
+    for r in range(6, ws_in.max_row + 1):
+        product_id = parse_number_like_id(ws_in.cell(row=r, column=1).value)
+        sku_id = parse_number_like_id(ws_in.cell(row=r, column=4).value)
+        old_price = parse_price_cell(ws_in.cell(row=r, column=6).value)
+        stock = to_int_or_none(ws_in.cell(row=r, column=7).value)
+        seller_sku = s_clean(ws_in.cell(row=r, column=8).value or ws_in.cell(row=r, column=5).value)
+        if not seller_sku:
+            continue
+        summary["rows_scanned"] += 1
+        new_price, reason = compute_price_from_maps(seller_sku, price_map, addon_map, "M3", discount_rp)
+        if new_price is None:
+            summary["rows_unmatched"] += 1
+            issues.append({"file": input_file.name, "row": r, "sku_full": seller_sku, "old_value": old_price, "new_value": "", "reason": reason})
+            continue
+        if only_changed and old_price is not None and int(old_price) == int(new_price):
+            continue
+        ws_out.cell(row=row_out, column=1).value = product_id
+        ws_out.cell(row=row_out, column=2).value = sku_id
+        ws_out.cell(row=row_out, column=3).value = new_price
+        ws_out.cell(row=row_out, column=4).value = stock if stock is not None else ""
+        row_out += 1
+        summary["rows_written"] += 1
+
+    summary["issues_count"] = len(issues)
+    return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", make_issues_workbook(issues) if issues else None, summary
+
+
+def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    return _process_powemerchant_price_common(
+        mass_files,
+        pricelist_file,
+        addon_file,
+        discount_rp,
+        "Harga Coret PowerMerchant",
+    )
+
+
+
+
 def process_tiktokshop_campaign(mass_files: List[Any]):
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
