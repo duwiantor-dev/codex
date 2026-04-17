@@ -190,6 +190,18 @@ def get_header_col_fuzzy(ws: Worksheet, header_row: int, candidates: List[str]) 
     return None
 
 
+def normalize_header_key(x) -> str:
+    return re.sub(r"[^a-z0-9]", "", s_clean(x).lower())
+
+
+def get_header_col_fuzzy_scan_rows(ws: Worksheet, candidates: List[str], scan_rows: int = 10) -> Tuple[Optional[int], Optional[int]]:
+    for r in range(1, min(scan_rows, ws.max_row) + 1):
+        col = get_header_col_fuzzy(ws, r, candidates)
+        if col is not None:
+            return r, col
+    return None, None
+
+
 def find_header_row_by_exact(ws: Worksheet, header_text: str, scan_rows: int = 150) -> Optional[int]:
     target = su(header_text)
     for r in range(1, min(ws.max_row, scan_rows) + 1):
@@ -1391,83 +1403,63 @@ def normalize_header_key(x) -> str:
     return re.sub(r"[^a-z0-9]", "", s_clean(x).lower())
 
 
-def get_row_headers(ws: Worksheet, row_no: int) -> List[str]:
-    return [
-        s_clean(ws.cell(row=row_no, column=c).value)
+def find_header_col_exact_or_contains(ws: Worksheet, header_row: int, candidates: List[str]) -> Optional[int]:
+    headers = {
+        c: normalize_header_key(ws.cell(row=header_row, column=c).value)
         for c in range(1, ws.max_column + 1)
-        if s_clean(ws.cell(row=row_no, column=c).value)
-    ]
+    }
 
+    normalized_candidates = [normalize_header_key(c) for c in candidates if s_clean(c)]
 
-def find_header_col_best_match(
-    ws: Worksheet,
-    header_rows: List[int],
-    exact_candidates: List[str],
-    contains_candidates: Optional[List[str]] = None,
-) -> Tuple[Optional[int], Optional[int]]:
-    exact_norm = [normalize_header_key(c) for c in exact_candidates if s_clean(c)]
-    contains_norm = [normalize_header_key(c) for c in (contains_candidates or []) if s_clean(c)]
+    for cand in normalized_candidates:
+        for col, header in headers.items():
+            if cand and header == cand:
+                return col
 
-    for header_row in header_rows:
-        for c in range(1, ws.max_column + 1):
-            cell_norm = normalize_header_key(ws.cell(row=header_row, column=c).value)
-            if cell_norm and cell_norm in exact_norm:
-                return header_row, c
+    for cand in sorted(normalized_candidates, key=len, reverse=True):
+        for col, header in headers.items():
+            if cand and header and cand in header:
+                return col
 
-    for header_row in header_rows:
-        for c in range(1, ws.max_column + 1):
-            cell_norm = normalize_header_key(ws.cell(row=header_row, column=c).value)
-            if not cell_norm:
-                continue
-            for cand in sorted(contains_norm, key=len, reverse=True):
-                if cand and cand in cell_norm:
-                    return header_row, c
-
-    return None, None
+    return None
 
 
 def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
-    header_rows = list(range(1, min(5, ws.max_row) + 1))
+    header_row = 1
     data_start = 5
+    sku_candidates = [
+        "Seller SKU", "SellerSKU", "SKU Seller", "Seller SKU Code", "Merchant SKU",
+        "Seller Item SKU", "SKU", "Kode SKU", "Kode Seller SKU"
+    ]
+    stok_candidates = ["Stok", "Stock", "Jumlah Stok", "Stock Qty", "Qty", "Quantity"]
 
-    _, sku_col = find_header_col_best_match(
-        ws,
-        header_rows,
-        exact_candidates=["Seller SKU", "SellerSKU", "SKU Seller", "Seller Item SKU", "Kode Seller SKU"],
-        contains_candidates=["Seller SKU", "SKU Seller", "Merchant SKU", "Kode SKU", "SKU"],
-    )
-    _, stok_col = find_header_col_best_match(
-        ws,
-        header_rows,
-        exact_candidates=["Stok", "Stock", "Jumlah Stok", "Stock Qty", "Quantity", "Qty"],
-        contains_candidates=["Stok", "Stock", "Quantity", "Qty"],
-    )
+    sku_col = find_header_col_exact_or_contains(ws, header_row, sku_candidates)
+    stok_col = find_header_col_exact_or_contains(ws, header_row, stok_candidates)
 
     if sku_col is None:
-        scanned = {row_no: get_row_headers(ws, row_no) for row_no in header_rows}
-        raise ValueError(f"Kolom SKU Blibli tidak ketemu. Header terbaca: {scanned}")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom SKU Blibli tidak ketemu pada row 1. Header terbaca: {headers}")
     if stok_col is None:
-        scanned = {row_no: get_row_headers(ws, row_no) for row_no in header_rows}
-        raise ValueError(f"Kolom Stok Blibli tidak ketemu. Header terbaca: {scanned}")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom Stok Blibli tidak ketemu pada row 1. Header terbaca: {headers}")
 
     return data_start, sku_col, stok_col
 
 
 def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
-    header_rows = list(range(1, min(5, ws.max_row) + 1))
+    header_row = 1
     data_start, sku_col, stok_col = find_blibli_stock_columns(ws)
-
-    _, harga_col = find_header_col_best_match(
+    harga_col = find_header_col_exact_or_contains(
         ws,
-        header_rows,
-        exact_candidates=["Harga (Rp)", "Harga Rp", "Normal Price"],
-        contains_candidates=["Harga(Rp)", "Harga Rp", "Normal Price"],
+        header_row,
+        ["Harga (Rp)", "Harga Rp", "Harga Dasar", "Normal Price"],
     )
-    _, harga_jual_col = find_header_col_best_match(
+    harga_jual_col = find_header_col_exact_or_contains(
         ws,
-        header_rows,
-        exact_candidates=["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual", "Selling Price"],
-        contains_candidates=["Harga Penjualan", "Harga Jual", "Selling Price"],
+        header_row,
+        ["Harga Penjualan (Rp)", "Harga Penjualan", "Harga Jual", "Selling Price"],
     )
 
     if harga_col is None:
@@ -1479,41 +1471,27 @@ def find_blibli_columns(ws: Worksheet) -> Tuple[int, int, int, int, int]:
 
 
 def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
-    header_rows = list(range(1, min(5, ws.max_row) + 1))
+    header_row = 1
     data_start = 2
-
-    _, sku_col = find_header_col_best_match(
-        ws,
-        header_rows,
-        exact_candidates=["SKU Produk", "Seller SKU", "SKU Penjual", "Merchant SKU"],
-        contains_candidates=["SKU Produk", "Seller SKU", "SKU Penjual", "Merchant SKU", "SKU"],
-    )
-    _, stok_col = find_header_col_best_match(
-        ws,
-        header_rows,
-        exact_candidates=["Stok", "Stock", "Qty", "Quantity", "Jumlah Stok"],
-        contains_candidates=["Stok", "Stock", "Quantity", "Qty"],
-    )
+    sku_col = find_header_col_exact_or_contains(ws, header_row, ["SKU Produk", "SKU", "Seller SKU", "SKU Penjual", "Merchant SKU"])
+    stok_col = find_header_col_exact_or_contains(ws, header_row, ["Stok", "Stock", "Qty", "Quantity", "Jumlah Stok"])
 
     if sku_col is None:
-        scanned = {row_no: get_row_headers(ws, row_no) for row_no in header_rows}
-        raise ValueError(f"Kolom SKU Akulaku tidak ketemu. Header terbaca: {scanned}")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom SKU Akulaku tidak ketemu pada row 1. Header terbaca: {headers}")
     if stok_col is None:
-        scanned = {row_no: get_row_headers(ws, row_no) for row_no in header_rows}
-        raise ValueError(f"Kolom Stok Akulaku tidak ketemu. Header terbaca: {scanned}")
+        headers = [s_clean(ws.cell(row=header_row, column=c).value) for c in range(1, ws.max_column + 1)]
+        headers = [h for h in headers if h]
+        raise ValueError(f"Kolom Stok Akulaku tidak ketemu pada row 1. Header terbaca: {headers}")
 
     return data_start, sku_col, stok_col
 
 
 def find_akulaku_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
-    header_rows = list(range(1, min(5, ws.max_row) + 1))
+    header_row = 1
     data_start, sku_col, stok_col = find_akulaku_stock_columns(ws)
-    _, harga_col = find_header_col_best_match(
-        ws,
-        header_rows,
-        exact_candidates=["Harga", "Price", "Harga Jual", "Selling Price"],
-        contains_candidates=["Harga", "Price", "Selling Price"],
-    )
+    harga_col = find_header_col_exact_or_contains(ws, header_row, ["Harga", "Price", "Harga Jual", "Selling Price"])
 
     if harga_col is None:
         raise ValueError("Kolom 'Harga' tidak ketemu pada template Akulaku.")
