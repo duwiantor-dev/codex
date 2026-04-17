@@ -13,7 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "The Codex"
+APP_TITLE = "Codexid"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
@@ -1818,25 +1818,56 @@ def run_with_loading(process_fn, loading_text: str = "Memproses..."):
         progress.empty()
 
 
+
+def load_processor_module(module_name: str, filename: str):
+    module_key = f"_processor_module_{module_name}"
+    if module_key in st.session_state:
+        return st.session_state[module_key]
+
+    base_dir = Path(__file__).resolve().parent
+    module_path = base_dir / filename
+    if not module_path.exists():
+        raise FileNotFoundError(f"File processor tidak ditemukan: {filename}")
+
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Gagal memuat processor: {filename}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    st.session_state[module_key] = module
+    return module
+
+
+def render_processor_page(module_name: str, filename: str, page_title: str, page_description: str):
+    st.title(page_title)
+    st.caption(page_description)
+    try:
+        module = load_processor_module(module_name, filename)
+        render_fn = getattr(module, "render_app", None)
+        if render_fn is None:
+            raise AttributeError(f"Processor {filename} tidak punya fungsi render_app().")
+        render_fn()
+    except Exception as e:
+        st.error(f"Gagal membuka fitur {page_title}: {e}")
+
+
 # ============================================================
 # PAGES
 # ============================================================
 def render_dashboard():
     st.title(APP_TITLE)
-    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, dan **Submit Campaign** marketplace.")
-    c1, c2, c3, c4 = st.columns(4)
+    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, **Submit Campaign**, **Analisa Penjualan**, dan **Analisa Produk & Stok** marketplace.")
+    c1, c2, c3 = st.columns(3)
     with c1:
-        st.subheader("Update Stok")
-        st.write("- Shopee (Mall & Star)\n- TikTokShop\n- Bigseller")
+        st.subheader("Operasional Marketplace")
+        st.write("- Update Stok\n- Update Harga Normal\n- Update Harga Coret\n- Submit Campaign")
     with c2:
-        st.subheader("Update Harga Normal")
-        st.write("- Shopee (Mall & Star)\n- TikTokShop\n- PowerMerchant\n- Bigseller")
+        st.subheader("Analisa Penjualan")
+        st.write("- Processor: Redwood\n- Dashboard growth penjualan\n- Perbandingan periode & insight team")
     with c3:
-        st.subheader("Update Harga Coret")
-        st.write("- Shopee (Mall & Star)\n- TikTokShop\n- PowerMerchant")
-    with c4:
-        st.subheader("Submit Campaign")
-        st.write("- TikTokShop\n- Shopee (Coming Soon)")
+        st.subheader("Analisa Produk & Stok")
+        st.write("- Processor: Blackwood\n- Analisa produk vs divisi\n- Alert stok & SKU insight")
     st.info("Gunakan menu di sidebar untuk memilih fitur.")
 
 
@@ -2457,12 +2488,31 @@ def render_submit_campaign_tiktokshop():
 # ============================================================
 # SIDEBAR ROUTER
 # ============================================================
+
+
+def render_analisa_penjualan():
+    render_processor_page(
+        module_name="redwood_processor",
+        filename="Redwood.py",
+        page_title="Analisa Penjualan",
+        page_description="Fitur ini menggunakan processor Redwood yang terintegrasi ke launcher utama Codexid.",
+    )
+
+
+def render_analisa_produk_stok():
+    render_processor_page(
+        module_name="blackwood_processor",
+        filename="Blackwood.py",
+        page_title="Analisa Produk & Stok",
+        page_description="Fitur ini menggunakan processor Blackwood yang terintegrasi ke launcher utama Codexid.",
+    )
+
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign"],
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa"],
         key="sidebar_main_menu",
     )
 
@@ -2529,6 +2579,17 @@ def build_menu() -> str:
         else:
             route = "submit_campaign_tiktokshop"
 
+    elif group == "Analisa":
+        child = st.sidebar.radio(
+            "Pilih Fitur Analisa",
+            ["Analisa Penjualan", "Analisa Produk & Stok"],
+            key="sidebar_analisa_menu",
+        )
+        if child == "Analisa Penjualan":
+            route = "analisa_penjualan"
+        else:
+            route = "analisa_produk_stok"
+
     else:
         route = "dashboard"
 
@@ -2579,6 +2640,10 @@ def main():
         render_submit_campaign_shopee()
     elif route == "submit_campaign_tiktokshop":
         render_submit_campaign_tiktokshop()
+    elif route == "analisa_penjualan":
+        render_analisa_penjualan()
+    elif route == "analisa_produk_stok":
+        render_analisa_produk_stok()
     else:
         st.error("Menu tidak dikenal.")
 
