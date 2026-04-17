@@ -1850,12 +1850,12 @@ def render_redwood_app():
     st.markdown(
         """
     <style>
-    .block-container { padding-top: 0.25rem; padding-bottom: 1rem; }
+    .block-container { padding-top: 0.8rem; padding-bottom: 1rem; }
     section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
 
     /* Header (large -> small) */
-    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.05rem 0 0.6rem 0; }
-    .header-title { font-size: 22px; font-weight: 900; margin:0; line-height:1.1; color: #111827; }
+    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.9rem 0 0.8rem 0; }
+    .header-title { font-size: 22px; font-weight: 900; margin:0; line-height:1.2; color: #111827; }
 
     /* Make section headers smaller */
     h2 { font-size: 18px !important; }
@@ -2400,9 +2400,12 @@ def render_redwood_app():
 
 
     def _render_redwood_app_inner():
-        render_header()
+        main_col, control_col = st.columns([3.2, 1.15], gap="large")
 
-        with st.sidebar:
+        with main_col:
+            render_header()
+
+        with control_col:
             st.subheader("Upload Data")
             file_a = st.file_uploader("Excel A (.xlsx) — periode lama", type=["xlsx"], key="a")
             file_b = st.file_uploader("Excel B (.xlsx) — periode baru", type=["xlsx"], key="b")
@@ -2415,17 +2418,16 @@ def render_redwood_app():
             sheet_b = st.text_input("Nama sheet Excel B (kosongkan = sheet pertama)", "")
 
         if not file_a or not file_b:
-            st.info("Upload 2 file Excel dulu.")
+            with main_col:
+                st.info("Upload 2 file Excel dulu.")
             st.stop()
 
         with st.spinner("Membaca & membersihkan Excel (sekali di awal)..."):
             df_a_raw = read_excel_cached(file_a.getvalue(), sheet_a, header_row_a)
             df_b_raw = read_excel_cached(file_b.getvalue(), sheet_b, header_row_b)
-            a = clean_sales_df_cached(df_a_raw)
-            b = clean_sales_df_cached(df_b_raw)
+            df_a, a_date_min, a_date_max = clean_sales_df_cached(df_a_raw)
+            df_b, b_date_min, b_date_max = clean_sales_df_cached(df_b_raw)
 
-        df_a = a_df
-        df_b = b_df
         df_all = pd.concat([df_a, df_b], ignore_index=True)
 
         with control_col:
@@ -2496,7 +2498,8 @@ def render_redwood_app():
         qty_g = safe_growth_pct(k_this["qty"], k_last["qty"])
         aov_g = safe_growth_pct(k_this["aov"], k_last["aov"]) if (not pd.isna(k_this["aov"]) and not pd.isna(k_last["aov"])) else None
 
-        st.subheader("Ringkasan Periode")
+        with main_col:
+            st.subheader("Ringkasan Periode")
         c1, c2, c3, c4 = st.columns(4)
 
 
