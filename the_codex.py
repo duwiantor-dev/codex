@@ -284,6 +284,131 @@ def render_summary(title: str, summary: Dict[str, Any]):
     c4.metric("Skip / Issue", int(summary.get("rows_unmatched", 0) + summary.get("issues_count", 0)))
 
 
+def init_summary(files_total: int, *, include_unchanged: bool = False) -> Dict[str, int]:
+    summary = {
+        "files_total": int(files_total),
+        "rows_scanned": 0,
+        "rows_written": 0,
+        "rows_unmatched": 0,
+        "issues_count": 0,
+    }
+    if include_unchanged:
+        summary["rows_unchanged"] = 0
+    return summary
+
+
+def merge_summary_stats(summary: Dict[str, Any], stats: Dict[str, Any], keys: Tuple[str, ...]):
+    for key in keys:
+        summary[key] = int(summary.get(key, 0)) + int(stats.get(key, 0))
+
+
+def issues_workbook_or_none(issues: List[Dict[str, Any]]) -> Optional[bytes]:
+    return make_issues_workbook(issues) if issues else None
+
+
+def package_output_files(output_files: List[Tuple[str, bytes]], zip_name: str):
+    if len(output_files) == 1:
+        single_name, single_bytes = output_files[0]
+        return single_bytes, single_name
+    return zip_named_files(output_files), zip_name
+
+
+def prune_worksheet_to_changed_rows(ws: Worksheet, changed_rows: List[int], data_start: int):
+    if changed_rows:
+        keep = set(changed_rows)
+        for r in range(ws.max_row, data_start - 1, -1):
+            if r not in keep:
+                ws.delete_rows(r, 1)
+
+
+def append_no_changes_issue(issues: List[Dict[str, Any]], file_name: str):
+    issues.append({"file": file_name, "reason": "Tidak ada baris berubah pada file ini."})
+
+
+def process_marketplace_stock_sheet(
+    ws: Worksheet,
+    *,
+    file_name: str,
+    stock_lookup: Dict[str, Dict],
+    selected_modes: Set[str],
+    chosen_areas: Set[str],
+    chosen_gudangs: Set[str],
+    zero_below: int,
+    data_start: int,
+    sku_col: int,
+    qty_col: int,
+    summary: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+) -> List[int]:
+    changed_rows: List[int] = []
+    for r in range(data_start, ws.max_row + 1):
+        sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+        if not sku_full:
+            continue
+        summary["rows_scanned"] += 1
+        old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        if new_qty is None:
+            summary["rows_unmatched"] += 1
+            issues.append({
+                "file": file_name,
+                "row": r,
+                "sku_full": sku_full,
+                "old_value": old_qty,
+                "new_value": "",
+                "reason": "SKU tidak ditemukan di Pricelist stok",
+            })
+            continue
+        if old_qty is not None and int(old_qty) == int(new_qty):
+            continue
+        safe_set_cell_value(ws, r, qty_col, int(new_qty))
+        changed_rows.append(r)
+        summary["rows_written"] += 1
+    return changed_rows
+
+
+def process_marketplace_price_sheet(
+    ws: Worksheet,
+    *,
+    file_name: str,
+    price_map: Dict[str, Dict[str, int]],
+    addon_map: Dict[str, int],
+    discount_rp: int,
+    price_key: str,
+    data_start: int,
+    sku_col: int,
+    target_price_cols: List[int],
+    summary: Dict[str, Any],
+    issues: List[Dict[str, Any]],
+) -> List[int]:
+    changed_rows: List[int] = []
+    for r in range(data_start, ws.max_row + 1):
+        sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+        if not sku_full:
+            continue
+        summary["rows_scanned"] += 1
+        old_values = [parse_price_cell(ws.cell(row=r, column=col).value) for col in target_price_cols]
+        new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
+        if new_price is None:
+            summary["rows_unmatched"] += 1
+            issues.append({
+                "file": file_name,
+                "row": r,
+                "sku_full": sku_full,
+                "old_value": old_values[0] if old_values else "",
+                "new_value": "",
+                "reason": reason,
+            })
+            continue
+        if old_values and all(v is not None and int(v) == int(new_price) for v in old_values):
+            continue
+        for col in target_price_cols:
+            safe_set_cell_value(ws, r, col, int(new_price))
+        changed_rows.append(r)
+        summary["rows_written"] += 1
+    return changed_rows
+
+
 def cache_downloads(
     cache_key: str,
     result_name: str,
@@ -643,14 +768,13 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files), include_unchanged=True)
 
     for mf in mass_files:
         try:
             rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             changed_rows_all.extend(rows)
-            for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
-                summary[k] += stats[k]
+            merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
             issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
 
@@ -659,7 +783,7 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
 
     result_bytes = write_stock_shopee_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
-    return result_bytes, make_issues_workbook(issues) if issues else None, summary
+    return result_bytes, issues_workbook_or_none(issues), summary
 
 
 def find_tiktokshop_columns_readonly(ws) -> Tuple[int, int, int]:
@@ -743,14 +867,13 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files), include_unchanged=True)
 
     for mf in mass_files:
         try:
             rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
             changed_rows_all.extend(rows)
-            for k in ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"):
-                summary[k] += stats[k]
+            merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
             issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
 
@@ -759,7 +882,7 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
 
     result_bytes = write_stock_tiktokshop_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
-    return result_bytes, make_issues_workbook(issues) if issues else None, summary
+    return result_bytes, issues_workbook_or_none(issues), summary
 
 
 def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
@@ -777,7 +900,7 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
 def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
     output_parts: List[Tuple[str, bytes]] = []
     current_rows: List[List[Any]] = []
     current_part = 1
@@ -889,45 +1012,37 @@ def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
         data_start, sku_col, qty_col, _ = find_blibli_stock_columns(ws)
-
-        changed_rows: List[int] = []
-        for r in range(data_start, ws.max_row + 1):
-            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
-            if not sku_full:
-                continue
-            summary["rows_scanned"] += 1
-            old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-            new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
-            if new_qty is None:
-                summary["rows_unmatched"] += 1
-                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_qty, "new_value": "", "reason": "SKU tidak ditemukan di Pricelist stok"})
-                continue
-            if old_qty is not None and int(old_qty) == int(new_qty):
-                continue
-            safe_set_cell_value(ws, r, qty_col, int(new_qty))
-            changed_rows.append(r)
-            summary["rows_written"] += 1
+        changed_rows = process_marketplace_stock_sheet(
+            ws,
+            file_name=mf.name,
+            stock_lookup=stock_lookup,
+            selected_modes=selected_modes,
+            chosen_areas=chosen_areas,
+            chosen_gudangs=chosen_gudangs,
+            zero_below=zero_below,
+            data_start=data_start,
+            sku_col=sku_col,
+            qty_col=qty_col,
+            summary=summary,
+            issues=issues,
+        )
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            prune_worksheet_to_changed_rows(ws, changed_rows, data_start)
         else:
-            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+            append_no_changes_issue(issues, mf.name)
 
         output_files.append((f"hasil_update_stok_blibli_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), "hasil_update_stok_blibli.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_blibli.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
@@ -944,45 +1059,37 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         data_start, sku_col, qty_col = find_akulaku_stock_columns(ws)
-
-        changed_rows: List[int] = []
-        for r in range(data_start, ws.max_row + 1):
-            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
-            if not sku_full:
-                continue
-            summary["rows_scanned"] += 1
-            old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-            new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
-            if new_qty is None:
-                summary["rows_unmatched"] += 1
-                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_qty, "new_value": "", "reason": "SKU tidak ditemukan di Pricelist stok"})
-                continue
-            if old_qty is not None and int(old_qty) == int(new_qty):
-                continue
-            safe_set_cell_value(ws, r, qty_col, int(new_qty))
-            changed_rows.append(r)
-            summary["rows_written"] += 1
+        changed_rows = process_marketplace_stock_sheet(
+            ws,
+            file_name=mf.name,
+            stock_lookup=stock_lookup,
+            selected_modes=selected_modes,
+            chosen_areas=chosen_areas,
+            chosen_gudangs=chosen_gudangs,
+            zero_below=zero_below,
+            data_start=data_start,
+            sku_col=sku_col,
+            qty_col=qty_col,
+            summary=summary,
+            issues=issues,
+        )
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            prune_worksheet_to_changed_rows(ws, changed_rows, data_start)
         else:
-            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+            append_no_changes_issue(issues, mf.name)
 
         output_files.append((f"hasil_update_stok_akulaku_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), "hasil_update_stok_akulaku.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_akulaku.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 # ============================================================
 # PRICE LOADERS
@@ -1137,7 +1244,7 @@ def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, add
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
@@ -1206,9 +1313,8 @@ def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, add
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, f"hasil_{page_title.lower().replace(' ', '_')}.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 
@@ -1233,7 +1339,7 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
@@ -1272,9 +1378,8 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
         output_files.append((f"hasil_harga_normal_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), "hasil_harga_normal_tiktokshop.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_tiktokshop.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
@@ -1282,7 +1387,7 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
@@ -1321,9 +1426,8 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), f"hasil_{page_title.lower().replace(' ', '_')}.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, f"hasil_{page_title.lower().replace(' ', '_')}.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
@@ -1340,7 +1444,7 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
     output_parts: List[Tuple[str, bytes]] = []
     current_rows: List[List[Any]] = []
     current_part = 1
@@ -1436,9 +1540,8 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
             for c, val in enumerate(output_header, start=1):
                 empty_ws.cell(row=1, column=c).value = val
         output_parts.append(("hasil_harga_normal_bigseller_part_1.xlsx", workbook_to_bytes(empty_wb)))
-    if len(output_parts) == 1:
-        return output_parts[0][1], output_parts[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_parts), "hasil_harga_normal_bigseller.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_parts, "hasil_harga_normal_bigseller.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 
@@ -1459,47 +1562,36 @@ def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file:
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
         data_start, sku_col, price_col, sale_price_col = find_blibli_price_columns(ws)
-
-        changed_rows: List[int] = []
-        for r in range(data_start, ws.max_row + 1):
-            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
-            if not sku_full:
-                continue
-            summary["rows_scanned"] += 1
-            old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
-            old_sale_price = parse_price_cell(ws.cell(row=r, column=sale_price_col).value)
-            new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M3", discount_rp)
-            if new_price is None:
-                summary["rows_unmatched"] += 1
-                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_price, "new_value": "", "reason": reason})
-                continue
-            if old_price is not None and old_sale_price is not None and int(old_price) == int(new_price) and int(old_sale_price) == int(new_price):
-                continue
-            safe_set_cell_value(ws, r, price_col, int(new_price))
-            safe_set_cell_value(ws, r, sale_price_col, int(new_price))
-            changed_rows.append(r)
-            summary["rows_written"] += 1
+        changed_rows = process_marketplace_price_sheet(
+            ws,
+            file_name=mf.name,
+            price_map=price_map,
+            addon_map=addon_map,
+            discount_rp=discount_rp,
+            price_key="M3",
+            data_start=data_start,
+            sku_col=sku_col,
+            target_price_cols=[price_col, sale_price_col],
+            summary=summary,
+            issues=issues,
+        )
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            prune_worksheet_to_changed_rows(ws, changed_rows, data_start)
         else:
-            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+            append_no_changes_issue(issues, mf.name)
 
         output_files.append((f"hasil_harga_normal_blibli_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), "hasil_harga_normal_blibli.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_blibli.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 def find_akulaku_price_columns(ws: Worksheet) -> Tuple[int, int, int]:
@@ -1517,45 +1609,36 @@ def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
-    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+    summary = init_summary(len(mass_files))
 
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         data_start, sku_col, price_col = find_akulaku_price_columns(ws)
-
-        changed_rows: List[int] = []
-        for r in range(data_start, ws.max_row + 1):
-            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
-            if not sku_full:
-                continue
-            summary["rows_scanned"] += 1
-            old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
-            new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M3", discount_rp)
-            if new_price is None:
-                summary["rows_unmatched"] += 1
-                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_price, "new_value": "", "reason": reason})
-                continue
-            if old_price is not None and int(old_price) == int(new_price):
-                continue
-            safe_set_cell_value(ws, r, price_col, int(new_price))
-            changed_rows.append(r)
-            summary["rows_written"] += 1
+        changed_rows = process_marketplace_price_sheet(
+            ws,
+            file_name=mf.name,
+            price_map=price_map,
+            addon_map=addon_map,
+            discount_rp=discount_rp,
+            price_key="M3",
+            data_start=data_start,
+            sku_col=sku_col,
+            target_price_cols=[price_col],
+            summary=summary,
+            issues=issues,
+        )
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            prune_worksheet_to_changed_rows(ws, changed_rows, data_start)
         else:
-            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+            append_no_changes_issue(issues, mf.name)
 
         output_files.append((f"hasil_harga_normal_akulaku_{mf.name}", workbook_to_bytes(wb)))
 
     summary["issues_count"] = len(issues)
-    if len(output_files) == 1:
-        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_files), "hasil_harga_normal_akulaku.zip", make_issues_workbook(issues) if issues else None, summary
+    result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_akulaku.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 # ============================================================
 # SUBMIT CAMPAIGN PROCESSORS
@@ -1621,7 +1704,7 @@ def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file
         summary["rows_written"] += 1
 
     summary["issues_count"] = len(issues)
-    return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", make_issues_workbook(issues) if issues else None, summary
+    return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", issues_workbook_or_none(issues), summary
 
 
 def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
@@ -1705,20 +1788,8 @@ def process_tiktokshop_campaign(mass_files: List[Any]):
 
     summary["issues_count"] = len(issues)
 
-    if len(output_files) == 1:
-        return (
-            output_files[0][1],
-            output_files[0][0],
-            make_issues_workbook(issues) if issues else None,
-            summary,
-        )
-
-    return (
-        zip_named_files(output_files),
-        "hasil_submit_campaign_tiktokshop.zip",
-        make_issues_workbook(issues) if issues else None,
-        summary,
-    )
+    result_bytes, result_name = package_output_files(output_files, "hasil_submit_campaign_tiktokshop.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
 # ============================================================
