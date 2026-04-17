@@ -41,6 +41,8 @@ SESSION_DEFAULTS = {
     "stock_shopee_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_tiktokshop_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_bigseller_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "stock_blibli_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "stock_akulaku_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
@@ -864,6 +866,122 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
     return zip_named_files(output_parts), "hasil_update_stok_bigseller.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
+
+def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
+    header_row = 1
+    data_start = 5
+    sku_col = get_header_col_fuzzy(ws, header_row, ["Seller SKU"])
+    qty_col = get_header_col_fuzzy(ws, header_row, ["Stok", "Stock"])
+    sheet_col = None
+    for idx, sname in enumerate(ws.parent.sheetnames):
+        if ws.parent[sname] is ws:
+            sheet_col = idx
+            break
+    if sku_col is None or qty_col is None:
+        raise ValueError("Kolom Seller SKU/Stok tidak ketemu pada template Blibli.")
+    return data_start, sku_col, qty_col, 0
+
+
+def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+
+    for mf in mass_files:
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
+        data_start, sku_col, qty_col, _ = find_blibli_stock_columns(ws)
+
+        changed_rows: List[int] = []
+        for r in range(data_start, ws.max_row + 1):
+            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            if not sku_full:
+                continue
+            summary["rows_scanned"] += 1
+            old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+            new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            if new_qty is None:
+                summary["rows_unmatched"] += 1
+                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_qty, "new_value": "", "reason": "SKU tidak ditemukan di Pricelist stok"})
+                continue
+            if old_qty is not None and int(old_qty) == int(new_qty):
+                continue
+            safe_set_cell_value(ws, r, qty_col, int(new_qty))
+            changed_rows.append(r)
+            summary["rows_written"] += 1
+
+        if changed_rows:
+            keep = set(changed_rows)
+            for r in range(ws.max_row, data_start - 1, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
+        else:
+            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+
+        output_files.append((f"hasil_update_stok_blibli_{mf.name}", workbook_to_bytes(wb)))
+
+    summary["issues_count"] = len(issues)
+    if len(output_files) == 1:
+        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
+    return zip_named_files(output_files), "hasil_update_stok_blibli.zip", make_issues_workbook(issues) if issues else None, summary
+
+
+def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
+    header_row = 1
+    data_start = 2
+    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Produk"])
+    qty_col = get_header_col_fuzzy(ws, header_row, ["Stok", "Stock"])
+    if sku_col is None or qty_col is None:
+        raise ValueError("Kolom SKU Produk/Stok tidak ketemu pada template Akulaku.")
+    return data_start, sku_col, qty_col
+
+
+def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+
+    for mf in mass_files:
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        ws = wb.active
+        data_start, sku_col, qty_col = find_akulaku_stock_columns(ws)
+
+        changed_rows: List[int] = []
+        for r in range(data_start, ws.max_row + 1):
+            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            if not sku_full:
+                continue
+            summary["rows_scanned"] += 1
+            old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+            new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            if new_qty is None:
+                summary["rows_unmatched"] += 1
+                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_qty, "new_value": "", "reason": "SKU tidak ditemukan di Pricelist stok"})
+                continue
+            if old_qty is not None and int(old_qty) == int(new_qty):
+                continue
+            safe_set_cell_value(ws, r, qty_col, int(new_qty))
+            changed_rows.append(r)
+            summary["rows_written"] += 1
+
+        if changed_rows:
+            keep = set(changed_rows)
+            for r in range(ws.max_row, data_start - 1, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
+        else:
+            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+
+        output_files.append((f"hasil_update_stok_akulaku_{mf.name}", workbook_to_bytes(wb)))
+
+    summary["issues_count"] = len(issues)
+    if len(output_files) == 1:
+        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
+    return zip_named_files(output_files), "hasil_update_stok_akulaku.zip", make_issues_workbook(issues) if issues else None, summary
+
 # ============================================================
 # PRICE LOADERS
 # ============================================================
@@ -1321,6 +1439,122 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
     return zip_named_files(output_parts), "hasil_harga_normal_bigseller.zip", make_issues_workbook(issues) if issues else None, summary
 
 
+
+
+def find_blibli_price_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
+    header_row = 1
+    data_start = 5
+    sku_col = get_header_col_fuzzy(ws, header_row, ["Seller SKU"])
+    price_col = get_header_col_fuzzy(ws, header_row, ["Harga (Rp)", "Harga"])
+    sale_price_col = get_header_col_fuzzy(ws, header_row, ["Harga Penjualan (Rp)", "Harga Penjualan"])
+    if sku_col is None or price_col is None or sale_price_col is None:
+        raise ValueError("Kolom Seller SKU/Harga/Harga Penjualan tidak ketemu pada template Blibli.")
+    return data_start, sku_col, price_col, sale_price_col
+
+
+def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+
+    for mf in mass_files:
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
+        data_start, sku_col, price_col, sale_price_col = find_blibli_price_columns(ws)
+
+        changed_rows: List[int] = []
+        for r in range(data_start, ws.max_row + 1):
+            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            if not sku_full:
+                continue
+            summary["rows_scanned"] += 1
+            old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
+            old_sale_price = parse_price_cell(ws.cell(row=r, column=sale_price_col).value)
+            new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M3", discount_rp)
+            if new_price is None:
+                summary["rows_unmatched"] += 1
+                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_price, "new_value": "", "reason": reason})
+                continue
+            if old_price is not None and old_sale_price is not None and int(old_price) == int(new_price) and int(old_sale_price) == int(new_price):
+                continue
+            safe_set_cell_value(ws, r, price_col, int(new_price))
+            safe_set_cell_value(ws, r, sale_price_col, int(new_price))
+            changed_rows.append(r)
+            summary["rows_written"] += 1
+
+        if changed_rows:
+            keep = set(changed_rows)
+            for r in range(ws.max_row, data_start - 1, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
+        else:
+            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+
+        output_files.append((f"hasil_harga_normal_blibli_{mf.name}", workbook_to_bytes(wb)))
+
+    summary["issues_count"] = len(issues)
+    if len(output_files) == 1:
+        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
+    return zip_named_files(output_files), "hasil_harga_normal_blibli.zip", make_issues_workbook(issues) if issues else None, summary
+
+
+def find_akulaku_price_columns(ws: Worksheet) -> Tuple[int, int, int]:
+    header_row = 1
+    data_start = 2
+    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Produk"])
+    price_col = get_header_col_fuzzy(ws, header_row, ["Harga", "Price"])
+    if sku_col is None or price_col is None:
+        raise ValueError("Kolom SKU Produk/Harga tidak ketemu pada template Akulaku.")
+    return data_start, sku_col, price_col
+
+
+def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+    price_map = load_pricelist_price_map(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = {"files_total": len(mass_files), "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
+
+    for mf in mass_files:
+        wb = load_workbook(io.BytesIO(mf.getvalue()))
+        ws = wb.active
+        data_start, sku_col, price_col = find_akulaku_price_columns(ws)
+
+        changed_rows: List[int] = []
+        for r in range(data_start, ws.max_row + 1):
+            sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            if not sku_full:
+                continue
+            summary["rows_scanned"] += 1
+            old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
+            new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, "M3", discount_rp)
+            if new_price is None:
+                summary["rows_unmatched"] += 1
+                issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_price, "new_value": "", "reason": reason})
+                continue
+            if old_price is not None and int(old_price) == int(new_price):
+                continue
+            safe_set_cell_value(ws, r, price_col, int(new_price))
+            changed_rows.append(r)
+            summary["rows_written"] += 1
+
+        if changed_rows:
+            keep = set(changed_rows)
+            for r in range(ws.max_row, data_start - 1, -1):
+                if r not in keep:
+                    ws.delete_rows(r, 1)
+        else:
+            issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
+
+        output_files.append((f"hasil_harga_normal_akulaku_{mf.name}", workbook_to_bytes(wb)))
+
+    summary["issues_count"] = len(issues)
+    if len(output_files) == 1:
+        return output_files[0][1], output_files[0][0], make_issues_workbook(issues) if issues else None, summary
+    return zip_named_files(output_files), "hasil_harga_normal_akulaku.zip", make_issues_workbook(issues) if issues else None, summary
+
 # ============================================================
 # SUBMIT CAMPAIGN PROCESSORS
 # ============================================================
@@ -1738,6 +1972,96 @@ def render_update_stok_bigseller():
     render_downloads("stock_bigseller")
 
 
+
+
+def render_update_stok_blibli():
+    page_header(
+        "Update Stok Blibli",
+        "Memproses file mass update Blibli berdasarkan stok dari sheet pricelist LAPTOP, TELCO, dan PC HOM ELE.",
+        [
+            "Mass Update Blibli (.xlsx)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+        ],
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update Blibli", type=["xlsx"], accept_multiple_files=True, key="stock_blibli_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_blibli_pl")
+
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+        area_key_prefix="stock_blibli",
+        pricelist_file=pricelist_file,
+        mode_key="stock_blibli_mode",
+        loaded_areas_key="stock_blibli_areas_loaded",
+        load_button_key="load_area_blibli",
+    )
+
+    if st.button("Proses", key="btn_stock_blibli", disabled=process_disabled):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if pricelist_file is None:
+            st.error("Upload Pricelist dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                "Memproses update stok Blibli...",
+            )
+            cache_downloads("stock_blibli", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("stock_blibli")
+    render_downloads("stock_blibli")
+
+
+def render_update_stok_akulaku():
+    page_header(
+        "Update Stok Akulaku",
+        "Memproses file mass update Akulaku berdasarkan stok dari sheet pricelist LAPTOP, TELCO, dan PC HOM ELE.",
+        [
+            "Mass Update Akulaku (.xlsx)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+        ],
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update Akulaku", type=["xlsx"], accept_multiple_files=True, key="stock_akulaku_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_akulaku_pl")
+
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+        area_key_prefix="stock_akulaku",
+        pricelist_file=pricelist_file,
+        mode_key="stock_akulaku_mode",
+        loaded_areas_key="stock_akulaku_areas_loaded",
+        load_button_key="load_area_akulaku",
+    )
+
+    if st.button("Proses", key="btn_stock_akulaku", disabled=process_disabled):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if pricelist_file is None:
+            st.error("Upload Pricelist dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                "Memproses update stok Akulaku...",
+            )
+            cache_downloads("stock_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("stock_akulaku")
+    render_downloads("stock_akulaku")
+
+
 def render_harga_normal_shopee():
     page_header(
         "Harga Normal Shopee (Mall & Star)",
@@ -1774,6 +2098,80 @@ def render_harga_normal_shopee():
 
     render_cached_summary("normal_shopee")
     render_downloads("normal_shopee")
+
+
+
+
+def render_harga_normal_blibli():
+    page_header(
+        "Harga Normal Blibli",
+        "Mengubah harga normal Blibli berdasarkan sheet CHANGE di pricelist dan addon mapping. Kolom Harga (Rp) dan Harga Penjualan (Rp) akan diisi harga M3.",
+        ["Template Mass Update Blibli (.xlsx)", "Pricelist (.xlsx, tidak perlu ada yang di ubah)", "Addon Mapping (.xlsx)"],
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update", type=["xlsx"], accept_multiple_files=True, key="normal_blibli_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="normal_blibli_pl")
+    with c3:
+        addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_blibli_add")
+    discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_blibli_disc")
+
+    if st.button("Proses", key="btn_normal_blibli"):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if not pricelist_file or not addon_file:
+            st.error("Upload Pricelist dan Addon Mapping dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_blibli_price(mass_files, pricelist_file, addon_file, discount_rp),
+                "Memproses harga normal Blibli...",
+            )
+            cache_downloads("normal_blibli", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("normal_blibli")
+    render_downloads("normal_blibli")
+
+
+def render_harga_normal_akulaku():
+    page_header(
+        "Harga Normal Akulaku",
+        "Mengubah harga normal Akulaku berdasarkan sheet CHANGE di pricelist dan addon mapping.",
+        ["Template Mass Update Akulaku (.xlsx)", "Pricelist (.xlsx, tidak perlu ada yang di ubah)", "Addon Mapping (.xlsx)"],
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update", type=["xlsx"], accept_multiple_files=True, key="normal_akulaku_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="normal_akulaku_pl")
+    with c3:
+        addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_akulaku_add")
+    discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_akulaku_disc")
+
+    if st.button("Proses", key="btn_normal_akulaku"):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if not pricelist_file or not addon_file:
+            st.error("Upload Pricelist dan Addon Mapping dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_akulaku_price(mass_files, pricelist_file, addon_file, discount_rp),
+                "Memproses harga normal Akulaku...",
+            )
+            cache_downloads("normal_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("normal_akulaku")
+    render_downloads("normal_akulaku")
 
 
 def render_harga_coret_shopee():
@@ -2074,20 +2472,24 @@ def build_menu() -> str:
     elif group == "Update Stok":
         child = st.sidebar.radio(
             "Pilih Platform",
-            ["Shopee (Mall & Star)", "TikTokShop", "Bigseller"],
+            ["Shopee (Mall & Star)", "TikTokShop", "Bigseller", "Blibli", "Akulaku"],
             key="sidebar_update_stok_menu",
         )
         if child.startswith("Shopee"):
             route = "update_stok_shopee"
         elif child == "TikTokShop":
             route = "update_stok_tiktokshop"
-        else:
+        elif child == "Bigseller":
             route = "update_stok_bigseller"
+        elif child == "Blibli":
+            route = "update_stok_blibli"
+        else:
+            route = "update_stok_akulaku"
 
     elif group == "Update Harga Normal":
         child = st.sidebar.radio(
             "Pilih Platform",
-            ["Shopee (Mall & Star)", "TikTokShop", "PowerMerchant", "Bigseller"],
+            ["Shopee (Mall & Star)", "TikTokShop", "PowerMerchant", "Bigseller", "Blibli", "Akulaku"],
             key="sidebar_harga_normal_menu",
         )
         if child.startswith("Shopee"):
@@ -2096,8 +2498,12 @@ def build_menu() -> str:
             route = "harga_normal_tiktokshop"
         elif child == "PowerMerchant":
             route = "harga_normal_powermerchant"
-        else:
+        elif child == "Bigseller":
             route = "harga_normal_bigseller"
+        elif child == "Blibli":
+            route = "harga_normal_blibli"
+        else:
+            route = "harga_normal_akulaku"
 
     elif group == "Update Harga Coret":
         child = st.sidebar.radio(
@@ -2147,6 +2553,10 @@ def main():
         render_update_stok_tiktokshop()
     elif route == "update_stok_bigseller":
         render_update_stok_bigseller()
+    elif route == "update_stok_blibli":
+        render_update_stok_blibli()
+    elif route == "update_stok_akulaku":
+        render_update_stok_akulaku()
     elif route == "harga_normal_shopee":
         render_harga_normal_shopee()
     elif route == "harga_normal_tiktokshop":
@@ -2155,6 +2565,10 @@ def main():
         render_harga_normal_powemerchant()
     elif route == "harga_normal_bigseller":
         render_harga_normal_bigseller()
+    elif route == "harga_normal_blibli":
+        render_harga_normal_blibli()
+    elif route == "harga_normal_akulaku":
+        render_harga_normal_akulaku()
     elif route == "harga_coret_shopee":
         render_harga_coret_shopee()
     elif route == "harga_coret_tiktokshop":
