@@ -1826,7 +1826,7 @@ def run_with_loading(process_fn, loading_text: str = "Memproses..."):
 # EMBEDDED PROCESSORS
 # ============================================================
 
-def render_redwood_app():
+def render_analisa_penjualan_app():
     """Embedded processor: Analisa Penjualan"""
     import io
     import re
@@ -2280,7 +2280,7 @@ def render_redwood_app():
         return (
             df.style
             .format({"Growth %": "{:.2f}%"})
-            .applymap(color_growth, subset=["Growth %"])
+            .map(color_growth, subset=["Growth %"])
         )
 
 
@@ -2399,7 +2399,7 @@ def render_redwood_app():
 
 
 
-    def _render_redwood_app_inner():
+    def _render_analisa_penjualan_app_inner():
         render_header()
 
         header_row_a = 2
@@ -2434,11 +2434,11 @@ def render_redwood_app():
 
         with ctl1:
             compare_mode = st.selectbox("Pilih periode", ["MOM", "WOW", "MTD", "UPLOAD"], 0)
+            metric_choice = st.selectbox("Metric", ["Qty (QTY)", "Sales (JUMLAH)"], 0)
+            show_point_labels = st.toggle("Tampilkan angka di titik grafik", value=False)
 
         with ctl2:
             top_n = st.slider("Top N", 5, 30, 10, 1)
-            metric_choice = st.selectbox("Metric", ["Qty (QTY)", "Sales (JUMLAH)"], 0)
-            show_point_labels = st.toggle("Tampilkan angka di titik grafik", value=False)
 
         with ctl3:
             with st.form("filter_form", clear_on_submit=False):
@@ -3077,11 +3077,11 @@ def render_redwood_app():
                 v = v[["AREA", "QTY Ini", "QTY Lalu", "Delta", "Growth"]]
                 render_html_table(v)
 
-    _render_redwood_app_inner()
+    _render_analisa_penjualan_app_inner()
 
 
-def render_blackwood_app():
-    """Embedded processor: Analisa Produk & Stok"""
+def render_analisa_produk_app():
+    """Embedded processor: Analisa Produk"""
     import io
     import re
     from typing import List
@@ -3091,7 +3091,7 @@ def render_blackwood_app():
     import streamlit as st
 
 
-    APP_TITLE = "Analisa Produk & Stok"
+    APP_TITLE = "Analisa Produk"
 
 
     PERIODS = ["7DAY", "14DAY", "30DAY"]
@@ -4388,7 +4388,7 @@ def render_blackwood_app():
 
 
 
-    def _render_blackwood_app_inner():
+    def _render_analisa_produk_app_inner():
         st.title("Dashboard Analisa Produk")
 
         st.markdown('<div class="upload-card-wrap">', unsafe_allow_html=True)
@@ -4703,7 +4703,7 @@ def render_blackwood_app():
 
         st.markdown("<div style='height:120px;'></div>", unsafe_allow_html=True)
 
-    _render_blackwood_app_inner()
+    _render_analisa_produk_app_inner()
 
 
 # ============================================================
@@ -4711,17 +4711,17 @@ def render_blackwood_app():
 # ============================================================
 def render_dashboard():
     st.title(APP_TITLE)
-    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, **Submit Campaign**, **Analisa Penjualan**, dan **Analisa Produk & Stok** marketplace.")
+    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, **Submit Campaign**, **Analisa Penjualan**, dan **Analisa Produk** marketplace.")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.subheader("Operasional Marketplace")
         st.write("- Update Stok\n- Update Harga Normal\n- Update Harga Coret\n- Submit Campaign")
     with c2:
         st.subheader("Analisa Penjualan")
-        st.write("- Processor: Redwood\n- Dashboard growth penjualan\n- Perbandingan periode & insight team")
+        st.write("- Analisa Penjualan\n- Dashboard growth penjualan\n- Perbandingan periode & insight team")
     with c3:
-        st.subheader("Analisa Produk & Stok")
-        st.write("- Processor: Blackwood\n- Analisa produk vs divisi\n- Alert stok & SKU insight")
+        st.subheader("Analisa Produk")
+        st.write("- Analisa Produk\n- Analisa produk vs divisi\n- Alert stok & SKU insight")
     st.info("Gunakan menu di sidebar untuk memilih fitur.")
 
 
@@ -5348,18 +5348,18 @@ def render_analisa_penjualan():
     st.title("Analisa Penjualan")
     st.caption("Fitur analisa penjualan sudah tertanam langsung di file utama Codexid.")
     try:
-        render_redwood_app()
+        render_analisa_penjualan_app()
     except Exception as e:
         st.error(f"Gagal membuka fitur Analisa Penjualan: {e}")
 
 
-def render_analisa_produk_stok():
-    st.title("Analisa Produk & Stok")
-    st.caption("Fitur analisa produk & stok sudah tertanam langsung di file utama Codexid.")
+def render_analisa_produk():
+    st.title("Analisa Produk")
+    st.caption("Fitur analisa produk sudah tertanam langsung di file utama Codexid.")
     try:
-        render_blackwood_app()
+        render_analisa_produk_app()
     except Exception as e:
-        st.error(f"Gagal membuka fitur Analisa Produk & Stok: {e}")
+        st.error(f"Gagal membuka fitur Analisa Produk: {e}")
 
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
@@ -5436,7 +5436,7 @@ def build_menu() -> str:
     elif group == "Analisa":
         child = st.sidebar.radio(
             "Pilih Fitur Analisa",
-            ["Analisa Penjualan", "Analisa Produk & Stok"],
+            ["Analisa Penjualan", "Analisa Produk"],
             key="sidebar_analisa_menu",
         )
         if child == "Analisa Penjualan":
@@ -5497,7 +5497,7 @@ def main():
     elif route == "analisa_penjualan":
         render_analisa_penjualan()
     elif route == "analisa_produk_stok":
-        render_analisa_produk_stok()
+        render_analisa_produk()
     else:
         st.error("Menu tidak dikenal.")
 
