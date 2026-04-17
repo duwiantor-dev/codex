@@ -1864,10 +1864,10 @@ def render_dashboard():
         st.write("- Update Stok\n- Update Harga Normal\n- Update Harga Coret\n- Submit Campaign")
     with c2:
         st.subheader("Analisa Penjualan")
-        st.write("- Processor: Redwood\n- Dashboard growth penjualan\n- Perbandingan periode & insight team")
+        st.write("- Embedded: Redwood\n- Dashboard growth penjualan\n- Perbandingan periode & insight team")
     with c3:
         st.subheader("Analisa Produk & Stok")
-        st.write("- Processor: Blackwood\n- Analisa produk vs divisi\n- Alert stok & SKU insight")
+        st.write("- Embedded: Blackwood\n- Analisa produk vs divisi\n- Alert stok & SKU insight")
     st.info("Gunakan menu di sidebar untuk memilih fitur.")
 
 
@@ -2500,12 +2500,13 @@ def render_analisa_penjualan():
 
 
 def render_analisa_produk_stok():
-    render_processor_page(
-        module_name="blackwood_processor",
-        filename="Blackwood.py",
-        page_title="Analisa Produk & Stok",
-        page_description="Fitur ini menggunakan processor Blackwood yang terintegrasi ke launcher utama Codexid.",
-    )
+    st.title("Analisa Produk & Stok")
+    st.caption("Fitur analisa produk & stok sudah tertanam langsung di file utama Codexid.")
+    try:
+        render_blackwood_app()
+    except Exception as e:
+        st.error(f"Gagal membuka fitur Analisa Produk & Stok: {e}")
+
 
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
