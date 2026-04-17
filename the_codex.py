@@ -1836,7 +1836,9 @@ def render_redwood_app():
 
     import numpy as np
     import pandas as pd
-    import plotly.express as px
+    import importlib.util
+    import importlib
+    px = importlib.import_module("plotly.express") if importlib.util.find_spec("plotly.express") else None
     import streamlit as st
 
 
@@ -2604,35 +2606,39 @@ def render_redwood_app():
         )
         trend_dom["VALUE"] = trend_dom["VALUE"].fillna(0.0)
 
-        if show_point_labels:
-            trend_dom["LABEL"] = trend_dom["VALUE"].apply(compact_number)
-            fig = px.line(
-                trend_dom,
-                x="DAY",
-                y="VALUE",
-                color="PERIODE",
-                markers=True,
-                text="LABEL",
-                color_discrete_map=COLOR_MAP_PERIOD,
-            )
-            fig.update_traces(textposition="top center")
-        else:
-            fig = px.line(
-                trend_dom,
-                x="DAY",
-                y="VALUE",
-                color="PERIODE",
-                markers=True,
-                color_discrete_map=COLOR_MAP_PERIOD,
-            )
+        if px is not None:
+            if show_point_labels:
+                trend_dom["LABEL"] = trend_dom["VALUE"].apply(compact_number)
+                fig = px.line(
+                    trend_dom,
+                    x="DAY",
+                    y="VALUE",
+                    color="PERIODE",
+                    markers=True,
+                    text="LABEL",
+                    color_discrete_map=COLOR_MAP_PERIOD,
+                )
+                fig.update_traces(textposition="top center")
+            else:
+                fig = px.line(
+                    trend_dom,
+                    x="DAY",
+                    y="VALUE",
+                    color="PERIODE",
+                    markers=True,
+                    color_discrete_map=COLOR_MAP_PERIOD,
+                )
 
-        fig.update_layout(
-            xaxis_title="Tanggal (Day of Month)",
-            yaxis_title=metric_name,
-            legend_title_text="",
-            xaxis=dict(dtick=1),
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            fig.update_layout(
+                xaxis_title="Tanggal (Day of Month)",
+                yaxis_title=metric_name,
+                legend_title_text="",
+                xaxis=dict(dtick=1),
+            )
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            pivot_trend = trend_dom.pivot_table(index="DAY", columns="PERIODE", values="VALUE", aggfunc="sum").fillna(0.0)
+            st.line_chart(pivot_trend, use_container_width=True)
 
         # =========================
         # Cumulative chart
@@ -2672,32 +2678,36 @@ def render_redwood_app():
             lambda x: f"+{compact_number(x)}" if x > 0 else compact_number(x)
         )
 
-        fig_cum = px.line(
-            trend_cum,
-            x="DAY",
-            y="CUM_VALUE",
-            color="PERIODE",
-            markers=True,
-            color_discrete_map=COLOR_MAP_PERIOD,
-            custom_data=["BULAN_INI_TXT", "BULAN_LALU_TXT", "DELTA_TXT"],
-        )
-
-        fig_cum.update_traces(
-            hovertemplate=(
-                "<b>Hari %{x}</b><br>"
-                "Bulan Ini: %{customdata[0]}<br>"
-                "Bulan Lalu: %{customdata[1]}<br>"
-                "Delta: %{customdata[2]}<extra>%{fullData.name}</extra>"
+        if px is not None:
+            fig_cum = px.line(
+                trend_cum,
+                x="DAY",
+                y="CUM_VALUE",
+                color="PERIODE",
+                markers=True,
+                color_discrete_map=COLOR_MAP_PERIOD,
+                custom_data=["BULAN_INI_TXT", "BULAN_LALU_TXT", "DELTA_TXT"],
             )
-        )
 
-        fig_cum.update_layout(
-            xaxis_title="Tanggal (Day of Month)",
-            yaxis_title=f"Kumulatif {metric_name}",
-            legend_title_text="",
-            xaxis=dict(dtick=1),
-        )
-        st.plotly_chart(fig_cum, use_container_width=True)
+            fig_cum.update_traces(
+                hovertemplate=(
+                    "<b>Hari %{x}</b><br>"
+                    "Bulan Ini: %{customdata[0]}<br>"
+                    "Bulan Lalu: %{customdata[1]}<br>"
+                    "Delta: %{customdata[2]}<extra>%{fullData.name}</extra>"
+                )
+            )
+
+            fig_cum.update_layout(
+                xaxis_title="Tanggal (Day of Month)",
+                yaxis_title=f"Kumulatif {metric_name}",
+                legend_title_text="",
+                xaxis=dict(dtick=1),
+            )
+            st.plotly_chart(fig_cum, use_container_width=True)
+        else:
+            pivot_cum = trend_cum.pivot_table(index="DAY", columns="PERIODE", values="CUM_VALUE", aggfunc="sum").fillna(0.0)
+            st.line_chart(pivot_cum, use_container_width=True)
 
 
         # =========================
