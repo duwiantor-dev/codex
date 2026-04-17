@@ -1854,7 +1854,7 @@ def render_redwood_app():
     section[data-testid="stSidebar"] .block-container { padding-top: 0.6rem; }
 
     /* Header (large -> small) */
-    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.9rem 0 0.8rem 0; }
+    .header-wrap { display:flex; align-items:center; gap:12px; margin: 0.35rem 0 0.8rem 0; }
     .header-title { font-size: 22px; font-weight: 900; margin:0; line-height:1.2; color: #111827; }
 
     /* Make section headers smaller */
@@ -2400,26 +2400,31 @@ def render_redwood_app():
 
 
     def _render_redwood_app_inner():
-        main_col, control_col = st.columns([3.2, 1.15], gap="large")
+        render_header()
 
-        with main_col:
-            render_header()
+        st.subheader("Upload & Pengaturan")
+        upload_col1, upload_col2, upload_col3, upload_col4 = st.columns([1.2, 1.2, 1, 1], gap="large")
 
-        with control_col:
-            st.subheader("Upload Data")
+        with upload_col1:
+            st.markdown("**Upload Data**")
             file_a = st.file_uploader("Excel A (.xlsx) — periode lama", type=["xlsx"], key="a")
+
+        with upload_col2:
+            st.markdown("**Upload Data**")
             file_b = st.file_uploader("Excel B (.xlsx) — periode baru", type=["xlsx"], key="b")
 
-            st.markdown("---")
-            st.subheader("Header & Sheet")
+        with upload_col3:
+            st.markdown("**Header & Sheet**")
             header_row_a = st.number_input("Header row Excel A (mulai dari 1)", 1, 30, 2, 1)
             header_row_b = st.number_input("Header row Excel B (mulai dari 1)", 1, 30, 2, 1)
+
+        with upload_col4:
+            st.markdown("**Header & Sheet**")
             sheet_a = st.text_input("Nama sheet Excel A (kosongkan = sheet pertama)", "")
             sheet_b = st.text_input("Nama sheet Excel B (kosongkan = sheet pertama)", "")
 
         if not file_a or not file_b:
-            with main_col:
-                st.info("Upload 2 file Excel dulu.")
+            st.info("Upload 2 file Excel dulu.")
             st.stop()
 
         with st.spinner("Membaca & membersihkan Excel (sekali di awal)..."):
@@ -2430,27 +2435,32 @@ def render_redwood_app():
 
         df_all = pd.concat([df_a, df_b], ignore_index=True)
 
-        with control_col:
-            st.markdown("---")
+        st.markdown("---")
+        ctl1, ctl2, ctl3 = st.columns([1, 1, 1.35], gap="large")
+
+        with ctl1:
             st.subheader("Mode Perbandingan")
             compare_mode = st.selectbox("Pilih periode", ["MOM", "WOW", "MTD", "UPLOAD"], 0)
 
-            st.markdown("---")
+        with ctl2:
             st.subheader("Opsi Tampilan")
             top_n = st.slider("Top N", 5, 30, 10, 1)
             metric_choice = st.selectbox("Metric", ["Qty (QTY)", "Sales (JUMLAH)"], 0)
             show_point_labels = st.toggle("Tampilkan angka di titik grafik", value=False)
 
-            st.markdown("---")
+        with ctl3:
             st.subheader("Filter (multi pilih)")
             with st.form("filter_form", clear_on_submit=False):
-                category_sel = st.multiselect("CATEGORY (COUNTRY)", options_for(df_all, "COUNTRY"), default=[])
-                transaksi_sel = st.multiselect("TRANSAKSI", options_for(df_all, "TRANSAKSI"), default=[])
-                team_sel = st.multiselect("TEAM", options_for(df_all, "TEAM"), default=[])
-                product_sel = st.multiselect("PRODUCT", options_for(df_all, "PRODUCT"), default=[])
-                brand_sel = st.multiselect("BRAND", options_for(df_all, "BRAND"), default=[])
-                platform_sel = st.multiselect("PLATFORM (NAMA CUSTOMER)", options_for(df_all, "PLATFORM"), default=[])
-                apply_clicked = st.form_submit_button("✅ Apply Filter")
+                filter_col1, filter_col2 = st.columns(2, gap="medium")
+                with filter_col1:
+                    category_sel = st.multiselect("CATEGORY (COUNTRY)", options_for(df_all, "COUNTRY"), default=[])
+                    transaksi_sel = st.multiselect("TRANSAKSI", options_for(df_all, "TRANSAKSI"), default=[])
+                    team_sel = st.multiselect("TEAM", options_for(df_all, "TEAM"), default=[])
+                with filter_col2:
+                    product_sel = st.multiselect("PRODUCT", options_for(df_all, "PRODUCT"), default=[])
+                    brand_sel = st.multiselect("BRAND", options_for(df_all, "BRAND"), default=[])
+                    platform_sel = st.multiselect("PLATFORM (NAMA CUSTOMER)", options_for(df_all, "PLATFORM"), default=[])
+                apply_clicked = st.form_submit_button("✅ Apply Filter", use_container_width=True)
 
         if "filters" not in st.session_state:
             st.session_state["filters"] = {"COUNTRY": [], "TRANSAKSI": [], "TEAM": [], "PRODUCT": [], "BRAND": [], "PLATFORM": []}
