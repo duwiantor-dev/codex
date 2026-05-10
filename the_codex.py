@@ -1903,6 +1903,7 @@ def render_analisa_penjualan_app():
     import re
     from datetime import date, timedelta
     from typing import Optional, Tuple, Dict, List
+    from urllib.parse import quote, unquote
 
     import numpy as np
     import pandas as pd
@@ -2319,6 +2320,74 @@ def render_analisa_penjualan_app():
         st.markdown(html, unsafe_allow_html=True)
 
 
+    def get_brand_category_rules():
+        return [
+            ("delta semua produk", None),
+            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
+            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
+            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
+            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
+            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
+            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
+            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
+            ("delta tablet", ["TABLET", "TAB"]),
+        ]
+
+
+    def filter_by_brand_category(df: pd.DataFrame, brand: str, category_label: str) -> pd.DataFrame:
+        out = df[df["BRAND"].astype(str).str.upper().eq(str(brand).upper())].copy()
+        keywords_map = dict(get_brand_category_rules())
+        keywords = keywords_map.get(category_label)
+        if keywords:
+            pattern = "|".join([re.escape(k) for k in keywords])
+            out = out[out["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)].copy()
+        return out
+
+
+    def _get_query_param(name: str) -> str:
+        try:
+            val = st.query_params.get(name, "")
+        except Exception:
+            val = ""
+        if isinstance(val, list):
+            val = val[0] if val else ""
+        return unquote(str(val)) if val else ""
+
+
+    def sync_brand_click_from_query():
+        brand = _get_query_param("analysis_brand")
+        category = _get_query_param("analysis_category")
+        if brand and category:
+            st.session_state["analysis_brand_click"] = {"BRAND": brand, "CATEGORY": category}
+
+
+    def render_clickable_brand_delta_table(df: pd.DataFrame):
+        if df.empty:
+            st.dataframe(df, use_container_width=True, height=420, hide_index=True)
+            return
+
+        cols = list(df.columns)
+        html = ["<table>", "<thead><tr>"]
+        for col in cols:
+            html.append(f"<th>{col}</th>")
+        html.append("</tr></thead><tbody>")
+
+        for _, row in df.iterrows():
+            brand = str(row.get("BRAND", ""))
+            html.append("<tr>")
+            for col in cols:
+                val = row.get(col, "")
+                if col == "BRAND":
+                    html.append(f"<td>{val}</td>")
+                else:
+                    href = f"?analysis_brand={quote(brand)}&analysis_category={quote(col)}"
+                    html.append(f'<td><a href="{href}" style="color:inherit; text-decoration:none; font-weight:800; display:block;">{val}</a></td>')
+            html.append("</tr>")
+
+        html.append("</tbody></table>")
+        st.markdown("".join(html), unsafe_allow_html=True)
+
+
     def small_title(text: str, hint: str = ""):
         hint_html = f' <span class="muted">{hint}</span>' if hint else ""
         st.markdown(f'<div class="small-h">{text}{hint_html}</div>', unsafe_allow_html=True)
@@ -2472,17 +2541,7 @@ def render_analisa_penjualan_app():
 
     @st.cache_data(show_spinner=False)
     def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
-        category_rules = [
-            ("delta semua produk", None),
-            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
-            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
-            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
-            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
-            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
-            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
-            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
-            ("delta tablet", ["TABLET", "TAB"]),
-        ]
+        category_rules = get_brand_category_rules()
 
         def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
             if product_keywords is None:
@@ -2521,6 +2580,7 @@ def render_analisa_penjualan_app():
 
     def _render_analisa_penjualan_app_inner():
         render_header()
+        sync_brand_click_from_query()
 
         header_row_a = 2
         header_row_b = 2
@@ -2985,7 +3045,25 @@ def render_analisa_penjualan_app():
         st.caption("Untuk TEAM yang TURUN: ditampilkan top driver yang paling narik turun. Untuk TEAM yang NAIK: top driver yang paling narik naik.")
 
         topk = st.slider("Top driver per kategori", 1, 10, 3, 1)
-        analysis_df = team_driver_analysis_table_cached(df_last, df_this, top_k=topk)
+        brand_click = st.session_state.get("analysis_brand_click")
+        analysis_last = df_last
+        analysis_this = df_this
+
+        if brand_click:
+            clicked_brand = brand_click.get("BRAND", "")
+            clicked_category = brand_click.get("CATEGORY", "")
+            analysis_last = filter_by_brand_category(df_last, clicked_brand, clicked_category)
+            analysis_this = filter_by_brand_category(df_this, clicked_brand, clicked_category)
+            st.info(f"Filter dari Analisa Brand: BRAND = {clicked_brand} | kategori = {clicked_category}")
+            if st.button("Reset filter Analisa Brand", key="reset_analysis_brand_click"):
+                st.session_state.pop("analysis_brand_click", None)
+                try:
+                    st.query_params.clear()
+                except Exception:
+                    pass
+                st.rerun()
+
+        analysis_df = team_driver_analysis_table_cached(analysis_last, analysis_this, top_k=topk)
 
         st.dataframe(
             style_growth_pct_df(analysis_df),
@@ -3002,12 +3080,8 @@ def render_analisa_penjualan_app():
         st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
 
         brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
-        st.dataframe(
-            brand_analysis_df,
-            use_container_width=True,
-            height=420,
-            hide_index=True,
-        )
+        st.caption("Klik angka delta di tabel ini untuk mem-filter card Analisis Penyebab Perubahan sesuai BRAND + kategori PRODUCT yang dipilih.")
+        render_clickable_brand_delta_table(brand_analysis_df)
 
 
         # =========================
