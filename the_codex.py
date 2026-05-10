@@ -2517,6 +2517,153 @@ def render_analisa_penjualan_app():
             out[col] = out[col].map(format_int_id)
         return out
 
+    @st.cache_data(show_spinner=False)
+    def brand_delta_analysis_raw_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
+        category_rules = [
+            ("delta semua produk", None),
+            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
+            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
+            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
+            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
+            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
+            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
+            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
+            ("delta tablet", ["TABLET", "TAB"]),
+        ]
+
+        def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
+            if product_keywords is None:
+                last_src = df_last
+                this_src = df_this
+            else:
+                pattern = "|".join([re.escape(k) for k in product_keywords])
+                last_src = df_last[df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
+                this_src = df_this[df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
+
+            last_agg = last_src.groupby("BRAND", as_index=False).agg(LAST=("QTY", "sum"))
+            this_agg = this_src.groupby("BRAND", as_index=False).agg(THIS=("QTY", "sum"))
+            delta = this_agg.merge(last_agg, on="BRAND", how="outer").fillna(0.0)
+            delta[label] = delta["THIS"] - delta["LAST"]
+            delta = delta[["BRAND", label]]
+            return base.merge(delta, on="BRAND", how="outer")
+
+        brand_base = pd.DataFrame({"BRAND": sorted(set(df_last["BRAND"].dropna().astype(str)) | set(df_this["BRAND"].dropna().astype(str)))})
+        brand_base = brand_base[brand_base["BRAND"].astype(str).str.strip().ne("")].copy()
+
+        out = brand_base
+        for label, keywords in category_rules:
+            out = add_delta_col(out, label, keywords)
+
+        if out.empty:
+            return out
+
+        value_cols = [label for label, _ in category_rules]
+        out[value_cols] = out[value_cols].fillna(0.0)
+        out = out.sort_values("delta semua produk", ascending=False).copy()
+        return out
+
+
+    def render_clickable_brand_delta_table(raw_df: pd.DataFrame):
+        if raw_df.empty:
+            st.info("Tidak ada data brand pada filter & periode saat ini.")
+            return
+
+        value_cols = [c for c in raw_df.columns if c != "BRAND"]
+
+        header_cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
+        header_cols[0].markdown("**BRAND**")
+        for i, col_name in enumerate(value_cols, start=1):
+            header_cols[i].markdown(f"**{col_name}**")
+
+        table_box = st.container(height=420)
+        with table_box:
+            for r_idx, row in raw_df.reset_index(drop=True).iterrows():
+                cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
+                cols[0].markdown(str(row["BRAND"]))
+
+                for c_idx, col_name in enumerate(value_cols, start=1):
+                    val = float(row[col_name])
+                    label = format_int_id(val)
+
+                    clicked = cols[c_idx].button(
+                        label,
+                        key=f"brand_delta_click_{r_idx}_{c_idx}_{row['BRAND']}_{col_name}",
+                        use_container_width=True,
+                    )
+                    if clicked:
+                        st.session_state["selected_brand_delta_cell"] = {
+                            "brand": str(row["BRAND"]),
+                            "category": str(col_name),
+                            "value": val,
+                        }
+
+
+    def render_brand_team_detail_card(df_last: pd.DataFrame, df_this: pd.DataFrame):
+        selected = st.session_state.get("selected_brand_delta_cell")
+        if not selected:
+            st.info("Klik salah satu angka pada tabel Analisa Brand untuk menampilkan detail TEAM.")
+            return
+
+        selected_brand = selected.get("brand", "")
+        selected_kategori = selected.get("category", "")
+        selected_value = float(selected.get("value", 0))
+
+        category_map = {
+            "delta semua produk": None,
+            "delta laptop 2nd": ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"],
+            "delta laptop d": ["LAPTOP D", "LAPTOP-D", "LAPTOP D "],
+            "delta laptop R": ["LAPTOP R", "LAPTOP-R", "LAPTOP R "],
+            "delta aio": ["AIO", "ALL IN ONE", "ALL-IN-ONE"],
+            "delta pcdesktop": ["PCDESKTOP", "PC DESKTOP", "DESKTOP"],
+            "delta pcmini": ["PCMINI", "PC MINI", "MINI PC"],
+            "delta phone": ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"],
+            "delta tablet": ["TABLET", "TAB"],
+        }
+
+        keywords = category_map.get(selected_kategori)
+
+        if keywords is None:
+            df_last_team = df_last[df_last["BRAND"] == selected_brand].copy()
+            df_this_team = df_this[df_this["BRAND"] == selected_brand].copy()
+        else:
+            pattern = "|".join([re.escape(k) for k in keywords])
+            df_last_team = df_last[
+                (df_last["BRAND"] == selected_brand)
+                & (df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
+            ].copy()
+            df_this_team = df_this[
+                (df_this["BRAND"] == selected_brand)
+                & (df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
+            ].copy()
+
+        last_team = df_last_team.groupby("TEAM", as_index=False).agg(QTY_LALU=("QTY", "sum"))
+        this_team = df_this_team.groupby("TEAM", as_index=False).agg(QTY_INI=("QTY", "sum"))
+        team_detail = this_team.merge(last_team, on="TEAM", how="outer").fillna(0.0)
+
+        st.markdown("<hr/>", unsafe_allow_html=True)
+        st.subheader("👥 Detail TEAM dari Analisa Brand")
+        st.caption(f"BRAND: {selected_brand} | Kolom: {selected_kategori} | Delta: {format_int_id(selected_value)}")
+
+        if team_detail.empty:
+            st.info("Tidak ada data TEAM untuk cell ini.")
+            return
+
+        team_detail["DELTA"] = team_detail["QTY_INI"] - team_detail["QTY_LALU"]
+        team_detail["GROWTH_PCT"] = team_detail.apply(lambda r: safe_growth_pct(r["QTY_INI"], r["QTY_LALU"]), axis=1)
+
+        if selected_value < 0:
+            team_detail = team_detail.sort_values("DELTA", ascending=True)
+        else:
+            team_detail = team_detail.sort_values("DELTA", ascending=False)
+
+        team_detail["QTY Lalu"] = team_detail["QTY_LALU"].map(format_int_id)
+        team_detail["QTY Ini"] = team_detail["QTY_INI"].map(format_int_id)
+        team_detail["Delta"] = team_detail["DELTA"].map(format_int_id)
+        team_detail["Growth"] = team_detail["GROWTH_PCT"].apply(growth_badge_html)
+
+        render_html_table(team_detail[["TEAM", "QTY Lalu", "QTY Ini", "Delta", "Growth"]])
+
+
 
 
     def _render_analisa_penjualan_app_inner():
@@ -3002,96 +3149,9 @@ def render_analisa_penjualan_app():
         st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
 
         brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
-        st.dataframe(
-            brand_analysis_df,
-            use_container_width=True,
-            height=420,
-            hide_index=True,
-        )
-
-
-
-
-        # =========================
-        # CARD TEAM DETAIL FROM ANALISA BRAND
-        # =========================
-        st.markdown("<hr/>", unsafe_allow_html=True)
-        st.subheader("👥 Detail TEAM dari Analisa Brand")
-        st.caption("Klik BRAND + kategori product untuk melihat TEAM penyumbang delta terbesar.")
-
-        category_map = {
-            "delta semua produk": None,
-            "delta laptop 2nd": ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"],
-            "delta laptop d": ["LAPTOP D", "LAPTOP-D", "LAPTOP D "],
-            "delta laptop R": ["LAPTOP R", "LAPTOP-R", "LAPTOP R "],
-            "delta aio": ["AIO", "ALL IN ONE", "ALL-IN-ONE"],
-            "delta pcdesktop": ["PCDESKTOP", "PC DESKTOP", "DESKTOP"],
-            "delta pcmini": ["PCMINI", "PC MINI", "MINI PC"],
-            "delta phone": ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"],
-            "delta tablet": ["TABLET", "TAB"],
-        }
-
-        col_brand, col_kategori = st.columns(2)
-
-        with col_brand:
-            selected_brand = st.selectbox(
-                "Pilih Brand",
-                sorted(brand_analysis_df["BRAND"].dropna().unique().tolist()),
-                key="brand_team_detail"
-            )
-
-        with col_kategori:
-            selected_kategori = st.selectbox(
-                "Pilih Kolom Delta",
-                list(category_map.keys()),
-                index=3,
-                key="kategori_team_detail"
-            )
-
-        keywords = category_map[selected_kategori]
-
-        if keywords is None:
-            df_last_team = df_last[df_last["BRAND"] == selected_brand].copy()
-            df_this_team = df_this[df_this["BRAND"] == selected_brand].copy()
-        else:
-            pattern = "|".join([re.escape(k) for k in keywords])
-
-            df_last_team = df_last[
-                (df_last["BRAND"] == selected_brand)
-                & (df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
-            ].copy()
-
-            df_this_team = df_this[
-                (df_this["BRAND"] == selected_brand)
-                & (df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
-            ].copy()
-
-        last_team = df_last_team.groupby("TEAM", as_index=False).agg(QTY_LALU=("QTY", "sum"))
-        this_team = df_this_team.groupby("TEAM", as_index=False).agg(QTY_INI=("QTY", "sum"))
-
-        team_detail = this_team.merge(last_team, on="TEAM", how="outer").fillna(0.0)
-
-        if not team_detail.empty:
-            team_detail["DELTA"] = team_detail["QTY_INI"] - team_detail["QTY_LALU"]
-            team_detail["GROWTH_PCT"] = team_detail.apply(
-                lambda r: safe_growth_pct(r["QTY_INI"], r["QTY_LALU"]),
-                axis=1
-            )
-
-            team_detail = team_detail.sort_values("DELTA", ascending=True)
-
-            team_detail["QTY Lalu"] = team_detail["QTY_LALU"].map(format_int_id)
-            team_detail["QTY Ini"] = team_detail["QTY_INI"].map(format_int_id)
-            team_detail["Delta"] = team_detail["DELTA"].map(format_int_id)
-            team_detail["Growth"] = team_detail["GROWTH_PCT"].apply(growth_badge_html)
-
-            render_html_table(
-                team_detail[
-                    ["TEAM", "QTY Lalu", "QTY Ini", "Delta", "Growth"]
-                ]
-            )
-        else:
-            st.info("Tidak ada data TEAM untuk kombinasi BRAND & kategori ini.")
+        brand_analysis_raw_df = brand_delta_analysis_raw_cached(df_last, df_this)
+        render_clickable_brand_delta_table(brand_analysis_raw_df)
+        render_brand_team_detail_card(df_last, df_this)
 
 
         # =========================
