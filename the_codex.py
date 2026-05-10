@@ -2600,12 +2600,42 @@ def render_analisa_penjualan_app():
                 for c_idx, col_name in enumerate(value_cols, start=1):
                     val = float(row[col_name])
                     label = format_int_id(val)
+                    if val < 0:
+                        label = f"🔻 {label}"
+
+                    btn_type = "secondary"
+                    if val < 0:
+                        cols[c_idx].markdown(
+                            """
+                            <style>
+                            div[data-testid="stButton"] > button[kind="secondary"]{
+                                border-color:#f8b4c0;
+                            }
+                            </style>
+                            """,
+                            unsafe_allow_html=True,
+                        )
 
                     clicked = cols[c_idx].button(
                         label,
                         key=f"brand_delta_click_{r_idx}_{c_idx}_{row['BRAND']}_{col_name}",
                         use_container_width=True,
+                        type=btn_type,
                     )
+
+                    if val < 0:
+                        cols[c_idx].markdown(
+                            f"""
+                            <style>
+                            div[data-testid="stButton"] button[key="brand_delta_click_{r_idx}_{c_idx}_{row['BRAND']}_{col_name}"] {{
+                                background-color:#ffe5ea !important;
+                                color:#c62828 !important;
+                                border:1px solid #f8b4c0 !important;
+                            }}
+                            </style>
+                            """,
+                            unsafe_allow_html=True,
+                        )
                     if clicked:
                         st.session_state["selected_brand_delta_cell"] = {
                             "brand": str(row["BRAND"]),
