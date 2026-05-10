@@ -2470,6 +2470,55 @@ def render_analisa_penjualan_app():
 
 
 
+    @st.cache_data(show_spinner=False)
+    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
+        category_rules = [
+            ("delta semua produk", None),
+            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
+            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
+            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
+            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
+            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
+            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
+            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
+            ("delta tablet", ["TABLET", "TAB"]),
+        ]
+
+        def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
+            if product_keywords is None:
+                last_src = df_last
+                this_src = df_this
+            else:
+                pattern = "|".join([re.escape(k) for k in product_keywords])
+                last_src = df_last[df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
+                this_src = df_this[df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
+
+            last_agg = last_src.groupby("BRAND", as_index=False).agg(LAST=("QTY", "sum"))
+            this_agg = this_src.groupby("BRAND", as_index=False).agg(THIS=("QTY", "sum"))
+            delta = this_agg.merge(last_agg, on="BRAND", how="outer").fillna(0.0)
+            delta[label] = delta["THIS"] - delta["LAST"]
+            delta = delta[["BRAND", label]]
+            return base.merge(delta, on="BRAND", how="outer")
+
+        brand_base = pd.DataFrame({"BRAND": sorted(set(df_last["BRAND"].dropna().astype(str)) | set(df_this["BRAND"].dropna().astype(str)))})
+        brand_base = brand_base[brand_base["BRAND"].astype(str).str.strip().ne("")].copy()
+
+        out = brand_base
+        for label, keywords in category_rules:
+            out = add_delta_col(out, label, keywords)
+
+        if out.empty:
+            return out
+
+        value_cols = [label for label, _ in category_rules]
+        out[value_cols] = out[value_cols].fillna(0.0)
+        out = out.sort_values("delta semua produk", ascending=False).copy()
+        for col in value_cols:
+            out[col] = out[col].map(format_int_id)
+        return out
+
+
+
     def _render_analisa_penjualan_app_inner():
         render_header()
 
@@ -2943,6 +2992,23 @@ def render_analisa_penjualan_app():
             use_container_width=True,
             height=520,
         )
+
+
+        # =========================
+        # NEW CARD: BRAND DELTA ANALYSIS
+        # =========================
+        st.markdown("<hr/>", unsafe_allow_html=True)
+        st.subheader("🏷️ Analisa Brand")
+        st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
+
+        brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
+        st.dataframe(
+            brand_analysis_df,
+            use_container_width=True,
+            height=420,
+            hide_index=True,
+        )
+
 
         # =========================
         # Top tables
