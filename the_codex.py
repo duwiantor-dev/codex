@@ -2559,7 +2559,7 @@ def render_analisa_penjualan_app():
 
         value_cols = [label for label, _ in category_rules]
         out[value_cols] = out[value_cols].fillna(0.0)
-        out = out.sort_values("delta semua produk", ascending=False).copy()
+        out = out.sort_values("BRAND", ascending=True).copy()
         return out
 
 
@@ -2572,8 +2572,22 @@ def render_analisa_penjualan_app():
 
         header_cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
         header_cols[0].markdown("**BRAND**")
+        def proper_delta_header(col_name: str) -> str:
+            mapping = {
+                "delta semua produk": "Delta Semua Produk",
+                "delta laptop 2nd": "Delta Laptop 2nd",
+                "delta laptop d": "Delta Laptop D",
+                "delta laptop R": "Delta Laptop R",
+                "delta aio": "Delta AIO",
+                "delta pcdesktop": "Delta PC Desktop",
+                "delta pcmini": "Delta PC Mini",
+                "delta phone": "Delta Phone",
+                "delta tablet": "Delta Tablet",
+            }
+            return mapping.get(col_name, str(col_name).title())
+
         for i, col_name in enumerate(value_cols, start=1):
-            header_cols[i].markdown(f"**{col_name}**")
+            header_cols[i].markdown(f"**{proper_delta_header(col_name)}**")
 
         table_box = st.container(height=420)
         with table_box:
@@ -2642,7 +2656,7 @@ def render_analisa_penjualan_app():
 
         st.markdown("<hr/>", unsafe_allow_html=True)
         st.subheader("👥 Detail TEAM dari Analisa Brand")
-        st.caption(f"BRAND: {selected_brand} | Kolom: {selected_kategori} | Delta: {format_int_id(selected_value)}")
+        st.caption(f"BRAND: {selected_brand} | Kolom: {proper_delta_header(selected_kategori)} | Delta: {format_int_id(selected_value)}")
 
         if team_detail.empty:
             st.info("Tidak ada data TEAM untuk cell ini.")
@@ -2650,6 +2664,54 @@ def render_analisa_penjualan_app():
 
         team_detail["DELTA"] = team_detail["QTY_INI"] - team_detail["QTY_LALU"]
         team_detail["GROWTH_PCT"] = team_detail.apply(lambda r: safe_growth_pct(r["QTY_INI"], r["QTY_LALU"]), axis=1)
+
+        # Delta total TEAM dari semua product/brand, supaya konteks performa TEAM tetap kelihatan.
+        total_last_team = df_last.groupby("TEAM", as_index=False).agg(QTY_TOTAL_LALU=("QTY", "sum"))
+        total_this_team = df_this.groupby("TEAM", as_index=False).agg(QTY_TOTAL_INI=("QTY", "sum"))
+        total_team = total_this_team.merge(total_last_team, on="TEAM", how="outer").fillna(0.0)
+        total_team["DELTA_TOTAL"] = total_team["QTY_TOTAL_INI"] - total_team["QTY_TOTAL_LALU"]
+        team_detail = team_detail.merge(total_team[["TEAM", "DELTA_TOTAL"]], on="TEAM", how="left").fillna({"DELTA_TOTAL": 0.0})
+
+        def _top_delta_driver(df_last_src: pd.DataFrame, df_this_src: pd.DataFrame, dim_col: str, selected_team: str, direction_value: float, top_k: int = 3) -> str:
+            last_src = df_last_src[df_last_src["TEAM"] == selected_team].copy()
+            this_src = df_this_src[df_this_src["TEAM"] == selected_team].copy()
+
+            a = this_src.groupby(dim_col, as_index=False).agg(THIS=("QTY", "sum"))
+            b = last_src.groupby(dim_col, as_index=False).agg(LAST=("QTY", "sum"))
+            m = a.merge(b, on=dim_col, how="outer").fillna(0.0)
+            m[dim_col] = m[dim_col].astype(str).str.strip()
+            m = m[m[dim_col].ne("")].copy()
+            if m.empty:
+                return "-"
+
+            m["DELTA_DRIVER"] = m["THIS"] - m["LAST"]
+            if direction_value < 0:
+                m = m[m["DELTA_DRIVER"] < 0].sort_values("DELTA_DRIVER", ascending=True)
+            elif direction_value > 0:
+                m = m[m["DELTA_DRIVER"] > 0].sort_values("DELTA_DRIVER", ascending=False)
+            else:
+                m = m[m["DELTA_DRIVER"] != 0].copy()
+                m["ABS_DELTA_DRIVER"] = m["DELTA_DRIVER"].abs()
+                m = m.sort_values("ABS_DELTA_DRIVER", ascending=False)
+
+            if m.empty:
+                return "-"
+
+            def fmt_driver(row):
+                delta = float(row["DELTA_DRIVER"])
+                sign = "+" if delta > 0 else ""
+                return f"{row[dim_col]} ({sign}{int(delta):,})".replace(",", ".")
+
+            return ", ".join([fmt_driver(row) for _, row in m.head(top_k).iterrows()])
+
+        team_detail["Delta Platform"] = team_detail.apply(
+            lambda r: _top_delta_driver(df_last_team, df_this_team, "PLATFORM", r["TEAM"], r["DELTA"]),
+            axis=1,
+        )
+        team_detail["SKU/Spesifikasi (driver)"] = team_detail.apply(
+            lambda r: _top_delta_driver(df_last_team, df_this_team, "SPESIFIKASI", r["TEAM"], r["DELTA"]),
+            axis=1,
+        )
 
         if selected_value < 0:
             team_detail = team_detail.sort_values("DELTA", ascending=True)
@@ -2659,9 +2721,23 @@ def render_analisa_penjualan_app():
         team_detail["QTY Lalu"] = team_detail["QTY_LALU"].map(format_int_id)
         team_detail["QTY Ini"] = team_detail["QTY_INI"].map(format_int_id)
         team_detail["Delta"] = team_detail["DELTA"].map(format_int_id)
+        team_detail["Delta total"] = team_detail["DELTA_TOTAL"].map(format_int_id)
         team_detail["Growth"] = team_detail["GROWTH_PCT"].apply(growth_badge_html)
 
-        render_html_table(team_detail[["TEAM", "QTY Lalu", "QTY Ini", "Delta", "Growth"]])
+        render_html_table(
+            team_detail[
+                [
+                    "TEAM",
+                    "QTY Lalu",
+                    "QTY Ini",
+                    "Delta",
+                    "Growth",
+                    "Delta total",
+                    "Delta Platform",
+                    "SKU/Spesifikasi (driver)",
+                ]
+            ]
+        )
 
 
 
