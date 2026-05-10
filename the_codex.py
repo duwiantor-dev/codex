@@ -2563,6 +2563,22 @@ def render_analisa_penjualan_app():
         return out
 
 
+
+    def proper_delta_header(col_name: str) -> str:
+        mapping = {
+            "delta semua produk": "Delta All",
+            "delta laptop 2nd": "Delta Laptop 2nd",
+            "delta laptop d": "Delta Laptop D",
+            "delta laptop R": "Delta Laptop R",
+            "delta aio": "Delta AIO",
+            "delta pcdesktop": "Delta PC Desktop",
+            "delta pcmini": "Delta PC Mini",
+            "delta phone": "Delta Phone",
+            "delta tablet": "Delta Tablet",
+        }
+        return mapping.get(col_name, str(col_name).title())
+
+
     def render_clickable_brand_delta_table(raw_df: pd.DataFrame):
         if raw_df.empty:
             st.info("Tidak ada data brand pada filter & periode saat ini.")
@@ -2571,22 +2587,7 @@ def render_analisa_penjualan_app():
         value_cols = [c for c in raw_df.columns if c != "BRAND"]
 
         header_cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
-        header_cols[0].markdown("**BRAND**")
-        def proper_delta_header(col_name: str) -> str:
-            mapping = {
-                "delta semua produk": "Delta Semua Produk",
-                "delta laptop 2nd": "Delta Laptop 2nd",
-                "delta laptop d": "Delta Laptop D",
-                "delta laptop R": "Delta Laptop R",
-                "delta aio": "Delta AIO",
-                "delta pcdesktop": "Delta PC Desktop",
-                "delta pcmini": "Delta PC Mini",
-                "delta phone": "Delta Phone",
-                "delta tablet": "Delta Tablet",
-            }
-            return mapping.get(col_name, str(col_name).title())
-
-        for i, col_name in enumerate(value_cols, start=1):
+        header_cols[0].markdown("**BRAND**")        for i, col_name in enumerate(value_cols, start=1):
             header_cols[i].markdown(f"**{proper_delta_header(col_name)}**")
 
         table_box = st.container(height=420)
