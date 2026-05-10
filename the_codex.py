@@ -2720,25 +2720,37 @@ def render_analisa_penjualan_app():
         else:
             team_detail = team_detail.sort_values("DELTA", ascending=False)
 
-        team_detail["QTY Lalu"] = team_detail["QTY_LALU"].map(format_int_id)
-        team_detail["QTY Ini"] = team_detail["QTY_INI"].map(format_int_id)
-        team_detail["Delta"] = team_detail["DELTA"].map(format_int_id)
-        team_detail["Delta total"] = team_detail["DELTA_TOTAL"].map(format_int_id)
-        team_detail["Growth"] = team_detail["GROWTH_PCT"].apply(growth_badge_html)
+        team_detail["QTY Lalu"] = team_detail["QTY_LALU"].astype(int)
+        team_detail["QTY Ini"] = team_detail["QTY_INI"].astype(int)
+        team_detail["Delta"] = team_detail["DELTA"].astype(int)
+        team_detail["Growth %"] = team_detail["GROWTH_PCT"].apply(lambda x: float(x) if (x is not None and not pd.isna(x)) else np.nan)
 
-        render_html_table(
-            team_detail[
-                [
-                    "TEAM",
-                    "QTY Lalu",
-                    "QTY Ini",
-                    "Delta",
-                    "Growth",
-                    "Delta total",
-                    "Delta Platform",
-                    "SKU/Spesifikasi (driver)",
-                ]
+        detail_view = team_detail[
+            [
+                "TEAM",
+                "QTY Lalu",
+                "QTY Ini",
+                "Delta",
+                "Growth %",
+                "Delta Platform",
+                "SKU/Spesifikasi (driver)",
             ]
+        ].copy()
+
+        st.dataframe(
+            style_growth_pct_df(detail_view),
+            use_container_width=True,
+            height=520,
+            hide_index=True,
+            column_config={
+                "TEAM": st.column_config.TextColumn("TEAM", width="small"),
+                "QTY Lalu": st.column_config.NumberColumn("QTY Lalu", width="small", format="%d"),
+                "QTY Ini": st.column_config.NumberColumn("QTY Ini", width="small", format="%d"),
+                "Delta": st.column_config.NumberColumn("Delta", width="small", format="%d"),
+                "Growth %": st.column_config.NumberColumn("Growth %", width="small", format="%.2f%%"),
+                "Delta Platform": st.column_config.TextColumn("Delta Platform", width="medium"),
+                "SKU/Spesifikasi (driver)": st.column_config.TextColumn("SKU/Spesifikasi (driver)", width="large"),
+            },
         )
 
 
