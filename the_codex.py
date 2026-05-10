@@ -2601,37 +2601,10 @@ def render_analisa_penjualan_app():
                     val = float(row[col_name])
                     label = format_int_id(val)
 
-                    btn_type = "secondary"
-
-                    if val < 0:
-                        cols[c_idx].markdown(
-                            f"""
-                            <style>
-                            div[data-testid="stButton"] button[kind="secondary"] {{
-                                border:1px solid #d1d5db;
-                            }}
-
-                            div[data-testid="stButton"] button[kind="secondary"][data-testid*="baseButton-secondary"] {{
-                                min-height:38px;
-                            }}
-
-                            div[data-testid="stButton"] button {{
-                                border-radius:10px;
-                            }}
-                            </style>
-                            """,
-                            unsafe_allow_html=True,
-                        )
-
-                    button_label = label
-                    if val < 0:
-                        button_label = f"﹣{abs(int(val)) if float(val).is_integer() else label.replace('-', '')}"
-
                     clicked = cols[c_idx].button(
-                        button_label,
+                        label,
                         key=f"brand_delta_click_{r_idx}_{c_idx}_{row['BRAND']}_{col_name}",
                         use_container_width=True,
-                        type=btn_type,
                     )
                     if clicked:
                         st.session_state["selected_brand_delta_cell"] = {
