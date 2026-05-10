@@ -1901,6 +1901,7 @@ def render_analisa_penjualan_app():
     """Embedded processor: Analisa Penjualan"""
     import io
     import re
+    from urllib.parse import quote, unquote
     from datetime import date, timedelta
     from typing import Optional, Tuple, Dict, List
 
@@ -2470,9 +2471,8 @@ def render_analisa_penjualan_app():
 
 
 
-    @st.cache_data(show_spinner=False)
-    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
-        category_rules = [
+    def get_brand_category_rules():
+        return [
             ("delta semua produk", None),
             ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
             ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
@@ -2483,6 +2483,37 @@ def render_analisa_penjualan_app():
             ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
             ("delta tablet", ["TABLET", "TAB"]),
         ]
+
+
+    def filter_by_brand_category(df: pd.DataFrame, brand: str, category_label: str) -> pd.DataFrame:
+        out = df[df["BRAND"].astype(str).str.upper().eq(str(brand).upper())].copy()
+        keywords = dict(get_brand_category_rules()).get(category_label)
+        if keywords:
+            pattern = "|".join([re.escape(k) for k in keywords])
+            out = out[out["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)].copy()
+        return out
+
+
+    def _get_query_param(name: str) -> str:
+        try:
+            val = st.query_params.get(name, "")
+        except Exception:
+            val = ""
+        if isinstance(val, list):
+            val = val[0] if val else ""
+        return unquote(str(val)) if val else ""
+
+
+    def sync_brand_team_click_from_query():
+        brand = _get_query_param("brand_team")
+        category = _get_query_param("brand_team_col")
+        if brand and category:
+            st.session_state["brand_team_click"] = {"BRAND": brand, "CATEGORY": category}
+
+
+    @st.cache_data(show_spinner=False)
+    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
+        category_rules = get_brand_category_rules()
 
         def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
             if product_keywords is None:
@@ -2513,9 +2544,35 @@ def render_analisa_penjualan_app():
         value_cols = [label for label, _ in category_rules]
         out[value_cols] = out[value_cols].fillna(0.0)
         out = out.sort_values("delta semua produk", ascending=False).copy()
-        for col in value_cols:
-            out[col] = out[col].map(format_int_id)
         return out
+
+
+    def render_clickable_brand_delta_table(df: pd.DataFrame):
+        if df.empty:
+            st.dataframe(df, use_container_width=True, height=420, hide_index=True)
+            return
+
+        cols = list(df.columns)
+        html = ["<table>", "<thead><tr>"]
+        for col in cols:
+            html.append(f"<th>{col}</th>")
+        html.append("</tr></thead><tbody>")
+
+        for _, row in df.iterrows():
+            brand = str(row.get("BRAND", ""))
+            html.append("<tr>")
+            for col in cols:
+                val = row.get(col, "")
+                if col == "BRAND":
+                    html.append(f"<td>{brand}</td>")
+                else:
+                    display_val = format_int_id(val)
+                    href = f"?brand_team={quote(brand)}&brand_team_col={quote(col)}"
+                    html.append(f'<td><a href="{href}" style="color:inherit; text-decoration:none; font-weight:800; display:block;">{display_val}</a></td>')
+            html.append("</tr>")
+
+        html.append("</tbody></table>")
+        st.markdown("".join(html), unsafe_allow_html=True)
 
 
 
@@ -3001,13 +3058,38 @@ def render_analisa_penjualan_app():
         st.subheader("🏷️ Analisa Brand")
         st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
 
+        sync_brand_team_click_from_query()
         brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
-        st.dataframe(
-            brand_analysis_df,
-            use_container_width=True,
-            height=420,
-            hide_index=True,
-        )
+        st.caption("Klik angka delta untuk menampilkan detail TEAM di bawah card ini sesuai BRAND + kategori PRODUCT yang dipilih.")
+        render_clickable_brand_delta_table(brand_analysis_df)
+
+        brand_click = st.session_state.get("brand_team_click")
+        if brand_click:
+            clicked_brand = brand_click.get("BRAND", "")
+            clicked_category = brand_click.get("CATEGORY", "")
+            valid_brand_cols = [label for label, _ in get_brand_category_rules()]
+            if clicked_brand and clicked_category in valid_brand_cols:
+                st.markdown("<hr/>", unsafe_allow_html=True)
+                st.subheader(f"👥 Detail TEAM — {clicked_brand} | {clicked_category}")
+                st.caption("Daftar TEAM difilter dari angka delta yang diklik di card Analisa Brand.")
+                drill_last = filter_by_brand_category(df_last, clicked_brand, clicked_category)
+                drill_this = filter_by_brand_category(df_this, clicked_brand, clicked_category)
+                drill_df = team_driver_analysis_table_cached(drill_last, drill_this, top_k=topk)
+                if drill_df.empty:
+                    st.info("Tidak ada detail TEAM untuk pilihan ini pada filter & periode saat ini.")
+                else:
+                    st.dataframe(
+                        style_growth_pct_df(drill_df),
+                        use_container_width=True,
+                        height=360,
+                    )
+                if st.button("Reset detail TEAM Analisa Brand", key="reset_brand_team_click"):
+                    st.session_state.pop("brand_team_click", None)
+                    try:
+                        st.query_params.clear()
+                    except Exception:
+                        pass
+                    st.rerun()
 
 
         # =========================
