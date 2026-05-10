@@ -2587,7 +2587,8 @@ def render_analisa_penjualan_app():
         value_cols = [c for c in raw_df.columns if c != "BRAND"]
 
         header_cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
-        header_cols[0].markdown("**BRAND**")        for i, col_name in enumerate(value_cols, start=1):
+        header_cols[0].markdown("**BRAND**")
+        for i, col_name in enumerate(value_cols, start=1):
             header_cols[i].markdown(f"**{proper_delta_header(col_name)}**")
 
         table_box = st.container(height=420)
