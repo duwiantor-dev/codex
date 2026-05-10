@@ -1903,7 +1903,6 @@ def render_analisa_penjualan_app():
     import re
     from datetime import date, timedelta
     from typing import Optional, Tuple, Dict, List
-    from urllib.parse import quote, unquote
 
     import numpy as np
     import pandas as pd
@@ -2320,74 +2319,6 @@ def render_analisa_penjualan_app():
         st.markdown(html, unsafe_allow_html=True)
 
 
-    def get_brand_category_rules():
-        return [
-            ("delta semua produk", None),
-            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
-            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
-            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
-            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
-            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
-            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
-            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
-            ("delta tablet", ["TABLET", "TAB"]),
-        ]
-
-
-    def filter_by_brand_category(df: pd.DataFrame, brand: str, category_label: str) -> pd.DataFrame:
-        out = df[df["BRAND"].astype(str).str.upper().eq(str(brand).upper())].copy()
-        keywords_map = dict(get_brand_category_rules())
-        keywords = keywords_map.get(category_label)
-        if keywords:
-            pattern = "|".join([re.escape(k) for k in keywords])
-            out = out[out["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)].copy()
-        return out
-
-
-    def _get_query_param(name: str) -> str:
-        try:
-            val = st.query_params.get(name, "")
-        except Exception:
-            val = ""
-        if isinstance(val, list):
-            val = val[0] if val else ""
-        return unquote(str(val)) if val else ""
-
-
-    def sync_brand_click_from_query():
-        brand = _get_query_param("analysis_brand")
-        category = _get_query_param("analysis_category")
-        if brand and category:
-            st.session_state["analysis_brand_click"] = {"BRAND": brand, "CATEGORY": category}
-
-
-    def render_clickable_brand_delta_table(df: pd.DataFrame):
-        if df.empty:
-            st.dataframe(df, use_container_width=True, height=420, hide_index=True)
-            return
-
-        cols = list(df.columns)
-        html = ["<table>", "<thead><tr>"]
-        for col in cols:
-            html.append(f"<th>{col}</th>")
-        html.append("</tr></thead><tbody>")
-
-        for _, row in df.iterrows():
-            brand = str(row.get("BRAND", ""))
-            html.append("<tr>")
-            for col in cols:
-                val = row.get(col, "")
-                if col == "BRAND":
-                    html.append(f"<td>{val}</td>")
-                else:
-                    href = f"?analysis_brand={quote(brand)}&analysis_category={quote(col)}"
-                    html.append(f'<td><a href="{href}" style="color:inherit; text-decoration:none; font-weight:800; display:block;">{val}</a></td>')
-            html.append("</tr>")
-
-        html.append("</tbody></table>")
-        st.markdown("".join(html), unsafe_allow_html=True)
-
-
     def small_title(text: str, hint: str = ""):
         hint_html = f' <span class="muted">{hint}</span>' if hint else ""
         st.markdown(f'<div class="small-h">{text}{hint_html}</div>', unsafe_allow_html=True)
@@ -2539,10 +2470,28 @@ def render_analisa_penjualan_app():
 
 
 
-    @st.cache_data(show_spinner=False)
-    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
-        category_rules = get_brand_category_rules()
+    BRAND_CATEGORY_RULES = [
+        ("delta semua produk", None),
+        ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
+        ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
+        ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
+        ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
+        ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
+        ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
+        ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
+        ("delta tablet", ["TABLET", "TAB"]),
+    ]
 
+
+    def brand_category_keywords(label: str) -> Optional[List[str]]:
+        for rule_label, keywords in BRAND_CATEGORY_RULES:
+            if rule_label == label:
+                return keywords
+        return None
+
+
+    @st.cache_data(show_spinner=False)
+    def brand_delta_analysis_raw_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
         def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
             if product_keywords is None:
                 last_src = df_last
@@ -2563,24 +2512,115 @@ def render_analisa_penjualan_app():
         brand_base = brand_base[brand_base["BRAND"].astype(str).str.strip().ne("")].copy()
 
         out = brand_base
-        for label, keywords in category_rules:
+        for label, keywords in BRAND_CATEGORY_RULES:
             out = add_delta_col(out, label, keywords)
 
         if out.empty:
             return out
 
-        value_cols = [label for label, _ in category_rules]
+        value_cols = [label for label, _ in BRAND_CATEGORY_RULES]
         out[value_cols] = out[value_cols].fillna(0.0)
         out = out.sort_values("delta semua produk", ascending=False).copy()
+        return out
+
+
+    @st.cache_data(show_spinner=False)
+    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
+        out = brand_delta_analysis_raw_cached(df_last, df_this).copy()
+        value_cols = [label for label, _ in BRAND_CATEGORY_RULES]
         for col in value_cols:
             out[col] = out[col].map(format_int_id)
         return out
 
 
+    def render_clickable_brand_delta_table(df_numeric: pd.DataFrame, table_key: str = "brand"):
+        import html
+        import urllib.parse
+
+        if df_numeric.empty:
+            st.info("Belum ada data brand pada filter & periode saat ini.")
+            return
+
+        current_params = dict(st.query_params)
+        cols = df_numeric.columns.tolist()
+        value_cols = [c for c in cols if c != "BRAND"]
+        rows_html = []
+
+        for _, row in df_numeric.iterrows():
+            brand_name = str(row.get("BRAND", "")).strip()
+            tds = [f"<td>{html.escape(brand_name)}</td>"]
+            for col in value_cols:
+                raw_val = row.get(col, 0)
+                try:
+                    num_val = float(raw_val)
+                except Exception:
+                    num_val = 0.0
+                val_txt = format_int_id(num_val)
+
+                if num_val < 0:
+                    params = current_params.copy()
+                    params["brand_drill"] = brand_name
+                    params["brand_drill_col"] = col
+                    href = "?" + urllib.parse.urlencode(params, doseq=True)
+                    tds.append(f'<td><a class="drill-link" href="{href}">{html.escape(val_txt)}</a></td>')
+                else:
+                    tds.append(f"<td>{html.escape(val_txt)}</td>")
+            rows_html.append("<tr>" + "".join(tds) + "</tr>")
+
+        ths = "".join([f"<th>{html.escape(c)}</th>" for c in cols])
+        html_table = f"""
+        <style>
+        a.drill-link {{
+            color: #dc2626 !important;
+            font-weight: 900;
+            text-decoration: underline;
+            text-underline-offset: 2px;
+        }}
+        </style>
+        <table>
+            <thead><tr>{ths}</tr></thead>
+            <tbody>{''.join(rows_html)}</tbody>
+        </table>
+        """
+        st.markdown(html_table, unsafe_allow_html=True)
+
+
+    @st.cache_data(show_spinner=False)
+    def brand_team_drilldown_cached(df_last: pd.DataFrame, df_this: pd.DataFrame, brand_name: str, category_label: str) -> pd.DataFrame:
+        keywords = brand_category_keywords(category_label)
+
+        def filter_src(df: pd.DataFrame) -> pd.DataFrame:
+            out = df[df["BRAND"].astype(str).str.strip().str.upper().eq(str(brand_name).strip().upper())].copy()
+            if keywords is not None:
+                pattern = "|".join([re.escape(k) for k in keywords])
+                out = out[out["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)].copy()
+            return out
+
+        last_src = filter_src(df_last)
+        this_src = filter_src(df_this)
+
+        last_team = last_src.groupby("TEAM", as_index=False).agg(QTY_LALU=("QTY", "sum"))
+        this_team = this_src.groupby("TEAM", as_index=False).agg(QTY_INI=("QTY", "sum"))
+        team = this_team.merge(last_team, on="TEAM", how="outer").fillna(0.0)
+        team = team[team["TEAM"].astype(str).str.strip().ne("")].copy()
+        if team.empty:
+            return team
+
+        team["DELTA_QTY"] = team["QTY_INI"] - team["QTY_LALU"]
+        team["GROWTH_PCT"] = team.apply(lambda r: safe_growth_pct(r["QTY_INI"], r["QTY_LALU"]), axis=1)
+        team = team.sort_values(["DELTA_QTY", "QTY_LALU"], ascending=[True, False]).copy()
+
+        out = team.copy()
+        out["QTY Lalu"] = out["QTY_LALU"].map(format_int_id)
+        out["QTY Ini"] = out["QTY_INI"].map(format_int_id)
+        out["Delta"] = out["DELTA_QTY"].map(lambda x: f"{int(x):,}".replace(",", "."))
+        out["Growth %"] = out["GROWTH_PCT"].apply(lambda x: float(x) if (x is not None and not pd.isna(x)) else np.nan)
+        return out[["TEAM", "QTY Lalu", "QTY Ini", "Delta", "Growth %"]]
+
+
 
     def _render_analisa_penjualan_app_inner():
         render_header()
-        sync_brand_click_from_query()
 
         header_row_a = 2
         header_row_b = 2
@@ -3045,25 +3085,7 @@ def render_analisa_penjualan_app():
         st.caption("Untuk TEAM yang TURUN: ditampilkan top driver yang paling narik turun. Untuk TEAM yang NAIK: top driver yang paling narik naik.")
 
         topk = st.slider("Top driver per kategori", 1, 10, 3, 1)
-        brand_click = st.session_state.get("analysis_brand_click")
-        analysis_last = df_last
-        analysis_this = df_this
-
-        if brand_click:
-            clicked_brand = brand_click.get("BRAND", "")
-            clicked_category = brand_click.get("CATEGORY", "")
-            analysis_last = filter_by_brand_category(df_last, clicked_brand, clicked_category)
-            analysis_this = filter_by_brand_category(df_this, clicked_brand, clicked_category)
-            st.info(f"Filter dari Analisa Brand: BRAND = {clicked_brand} | kategori = {clicked_category}")
-            if st.button("Reset filter Analisa Brand", key="reset_analysis_brand_click"):
-                st.session_state.pop("analysis_brand_click", None)
-                try:
-                    st.query_params.clear()
-                except Exception:
-                    pass
-                st.rerun()
-
-        analysis_df = team_driver_analysis_table_cached(analysis_last, analysis_this, top_k=topk)
+        analysis_df = team_driver_analysis_table_cached(df_last, df_this, top_k=topk)
 
         st.dataframe(
             style_growth_pct_df(analysis_df),
@@ -3079,9 +3101,26 @@ def render_analisa_penjualan_app():
         st.subheader("🏷️ Analisa Brand")
         st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
 
-        brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
-        st.caption("Klik angka delta di tabel ini untuk mem-filter card Analisis Penyebab Perubahan sesuai BRAND + kategori PRODUCT yang dipilih.")
-        render_clickable_brand_delta_table(brand_analysis_df)
+        brand_analysis_numeric_df = brand_delta_analysis_raw_cached(df_last, df_this)
+        render_clickable_brand_delta_table(brand_analysis_numeric_df)
+
+        selected_brand = st.query_params.get("brand_drill", "")
+        selected_brand_col = st.query_params.get("brand_drill_col", "")
+        valid_brand_cols = [label for label, _ in BRAND_CATEGORY_RULES]
+        if selected_brand and selected_brand_col in valid_brand_cols:
+            st.markdown("<hr/>", unsafe_allow_html=True)
+            st.subheader(f"👥 Detail TEAM penyebab turun — {selected_brand} | {selected_brand_col}")
+            st.caption("Urut dari TEAM dengan delta QTY paling turun. Klik angka negatif lain di tabel Analisa Brand untuk mengganti detail.")
+            drill_df = brand_team_drilldown_cached(df_last, df_this, selected_brand, selected_brand_col)
+            if drill_df.empty:
+                st.info("Tidak ada detail TEAM untuk pilihan ini pada filter & periode saat ini.")
+            else:
+                st.dataframe(
+                    style_growth_pct_df(drill_df),
+                    use_container_width=True,
+                    height=360,
+                    hide_index=True,
+                )
 
 
         # =========================
