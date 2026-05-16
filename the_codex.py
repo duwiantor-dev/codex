@@ -334,6 +334,7 @@ def process_marketplace_stock_sheet(
     chosen_areas: Set[str],
     chosen_gudangs: Set[str],
     zero_below: int,
+    force_zero_if_missing: bool = False,
     data_start: int,
     sku_col: int,
     qty_col: int,
@@ -347,7 +348,15 @@ def process_marketplace_stock_sheet(
             continue
         summary["rows_scanned"] += 1
         old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(
+            sku_full,
+            stock_lookup,
+            selected_modes,
+            chosen_areas,
+            chosen_gudangs,
+            zero_below,
+            force_zero_if_missing=force_zero_if_missing,
+        )
         if new_qty is None:
             summary["rows_unmatched"] += 1
             issues.append({
@@ -646,11 +655,12 @@ def pick_stock_value(
     chosen_areas: Set[str],
     chosen_gudangs: Set[str],
     zero_below: int = 0,
+    force_zero_if_missing: bool = False,
 ) -> Optional[int]:
     base, _ = split_sku_addons(sku_full)
     base_key = norm_sku(base)
     if not base_key or base_key not in stock_lookup:
-        return None
+        return 0 if force_zero_if_missing else None
 
     rec = stock_lookup[base_key]
     tot = rec.get("TOT")
@@ -722,7 +732,7 @@ def find_shopee_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -736,7 +746,15 @@ def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str,
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(
+            sku_full,
+            stock_lookup,
+            selected_modes,
+            chosen_areas,
+            chosen_gudangs,
+            zero_below,
+            force_zero_if_missing=force_zero_if_missing,
+        )
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -764,7 +782,7 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
     return workbook_to_bytes(out_wb)
 
 
-def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -772,7 +790,7 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
@@ -821,7 +839,7 @@ def find_tiktokshop_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -835,7 +853,15 @@ def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(
+            sku_full,
+            stock_lookup,
+            selected_modes,
+            chosen_areas,
+            chosen_gudangs,
+            zero_below,
+            force_zero_if_missing=force_zero_if_missing,
+        )
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -863,7 +889,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
-def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -871,7 +897,7 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
@@ -897,7 +923,7 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return header_row + 1, found_cols["sku"], found_cols["qty"]
 
 
-def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files))
@@ -942,7 +968,15 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
 
                 summary["rows_scanned"] += 1
                 old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+                new_qty = pick_stock_value(
+            sku_full,
+            stock_lookup,
+            selected_modes,
+            chosen_areas,
+            chosen_gudangs,
+            zero_below,
+            force_zero_if_missing=force_zero_if_missing,
+        )
 
                 if new_qty is None:
                     summary["rows_unmatched"] += 1
@@ -1008,7 +1042,7 @@ def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
     return data_start, sku_col, qty_col, 0
 
 
-def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1026,6 +1060,7 @@ def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
             chosen_areas=chosen_areas,
             chosen_gudangs=chosen_gudangs,
             zero_below=zero_below,
+            force_zero_if_missing=force_zero_if_missing,
             data_start=data_start,
             sku_col=sku_col,
             qty_col=qty_col,
@@ -1055,7 +1090,7 @@ def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, force_zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1073,6 +1108,7 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
             chosen_areas=chosen_areas,
             chosen_gudangs=chosen_gudangs,
             zero_below=zero_below,
+            force_zero_if_missing=force_zero_if_missing,
             data_start=data_start,
             sku_col=sku_col,
             qty_col=qty_col,
@@ -1812,6 +1848,12 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
         help="Selain Stok Nasional (TOT), mode stok bisa dipilih lebih dari 1. Jika pilih TOT bersamaan dengan mode lain, hasil stok akan pakai TOT.",
     ))
     zero_below = st.number_input("Stok < angka ini jadi 0", min_value=0, value=0, step=1, key=f"{area_key_prefix}_zero_below")
+    force_zero_if_missing = st.toggle(
+        "SKU tidak ditemukan di Pricelist = 0",
+        value=False,
+        key=f"{area_key_prefix}_force_zero_missing",
+        help="Default OFF: SKU yang tidak ditemukan tetap di-skip. Jika ON, SKU tersebut akan diisi stok 0.",
+    )
 
     needs_lookup_data = bool(selected_modes & {"Default", "Area", "Gudang"})
 
@@ -1867,7 +1909,7 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
     elif "Gudang" in selected_modes and not chosen_gudangs:
         process_disabled = True
 
-    return selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled
+    return selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled
 
 
 def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
@@ -2470,292 +2512,6 @@ def render_analisa_penjualan_app():
 
 
 
-    @st.cache_data(show_spinner=False)
-    def brand_delta_analysis_table_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
-        category_rules = [
-            ("delta semua produk", None),
-            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
-            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
-            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
-            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
-            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
-            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
-            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
-            ("delta tablet", ["TABLET", "TAB"]),
-        ]
-
-        def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
-            if product_keywords is None:
-                last_src = df_last
-                this_src = df_this
-            else:
-                pattern = "|".join([re.escape(k) for k in product_keywords])
-                last_src = df_last[df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
-                this_src = df_this[df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
-
-            last_agg = last_src.groupby("BRAND", as_index=False).agg(LAST=("QTY", "sum"))
-            this_agg = this_src.groupby("BRAND", as_index=False).agg(THIS=("QTY", "sum"))
-            delta = this_agg.merge(last_agg, on="BRAND", how="outer").fillna(0.0)
-            delta[label] = delta["THIS"] - delta["LAST"]
-            delta = delta[["BRAND", label]]
-            return base.merge(delta, on="BRAND", how="outer")
-
-        brand_base = pd.DataFrame({"BRAND": sorted(set(df_last["BRAND"].dropna().astype(str)) | set(df_this["BRAND"].dropna().astype(str)))})
-        brand_base = brand_base[brand_base["BRAND"].astype(str).str.strip().ne("")].copy()
-
-        out = brand_base
-        for label, keywords in category_rules:
-            out = add_delta_col(out, label, keywords)
-
-        if out.empty:
-            return out
-
-        value_cols = [label for label, _ in category_rules]
-        out[value_cols] = out[value_cols].fillna(0.0)
-        out = out.sort_values("delta semua produk", ascending=False).copy()
-        for col in value_cols:
-            out[col] = out[col].map(format_int_id)
-        return out
-
-    @st.cache_data(show_spinner=False)
-    def brand_delta_analysis_raw_cached(df_last: pd.DataFrame, df_this: pd.DataFrame) -> pd.DataFrame:
-        category_rules = [
-            ("delta semua produk", None),
-            ("delta laptop 2nd", ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"]),
-            ("delta laptop d", ["LAPTOP D", "LAPTOP-D", "LAPTOP D "]),
-            ("delta laptop R", ["LAPTOP R", "LAPTOP-R", "LAPTOP R "]),
-            ("delta aio", ["AIO", "ALL IN ONE", "ALL-IN-ONE"]),
-            ("delta pcdesktop", ["PCDESKTOP", "PC DESKTOP", "DESKTOP"]),
-            ("delta pcmini", ["PCMINI", "PC MINI", "MINI PC"]),
-            ("delta phone", ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"]),
-            ("delta tablet", ["TABLET", "TAB"]),
-        ]
-
-        def add_delta_col(base: pd.DataFrame, label: str, product_keywords: Optional[List[str]]) -> pd.DataFrame:
-            if product_keywords is None:
-                last_src = df_last
-                this_src = df_this
-            else:
-                pattern = "|".join([re.escape(k) for k in product_keywords])
-                last_src = df_last[df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
-                this_src = df_this[df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True)]
-
-            last_agg = last_src.groupby("BRAND", as_index=False).agg(LAST=("QTY", "sum"))
-            this_agg = this_src.groupby("BRAND", as_index=False).agg(THIS=("QTY", "sum"))
-            delta = this_agg.merge(last_agg, on="BRAND", how="outer").fillna(0.0)
-            delta[label] = delta["THIS"] - delta["LAST"]
-            delta = delta[["BRAND", label]]
-            return base.merge(delta, on="BRAND", how="outer")
-
-        brand_base = pd.DataFrame({"BRAND": sorted(set(df_last["BRAND"].dropna().astype(str)) | set(df_this["BRAND"].dropna().astype(str)))})
-        brand_base = brand_base[brand_base["BRAND"].astype(str).str.strip().ne("")].copy()
-
-        out = brand_base
-        for label, keywords in category_rules:
-            out = add_delta_col(out, label, keywords)
-
-        if out.empty:
-            return out
-
-        value_cols = [label for label, _ in category_rules]
-        out[value_cols] = out[value_cols].fillna(0.0)
-        out = out.sort_values("BRAND", ascending=True).copy()
-        return out
-
-
-
-    def proper_delta_header(col_name: str) -> str:
-        mapping = {
-            "delta semua produk": "Delta All",
-            "delta laptop 2nd": "Delta Laptop 2nd",
-            "delta laptop d": "Delta Laptop D",
-            "delta laptop R": "Delta Laptop R",
-            "delta aio": "Delta AIO",
-            "delta pcdesktop": "Delta PC Desktop",
-            "delta pcmini": "Delta PC Mini",
-            "delta phone": "Delta Phone",
-            "delta tablet": "Delta Tablet",
-        }
-        return mapping.get(col_name, str(col_name).title())
-
-
-    def render_clickable_brand_delta_table(raw_df: pd.DataFrame):
-        if raw_df.empty:
-            st.info("Tidak ada data brand pada filter & periode saat ini.")
-            return
-
-        value_cols = [c for c in raw_df.columns if c != "BRAND"]
-
-        header_cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
-        header_cols[0].markdown("**BRAND**")
-        for i, col_name in enumerate(value_cols, start=1):
-            header_cols[i].markdown(f"**{proper_delta_header(col_name)}**")
-
-        table_box = st.container(height=420)
-        with table_box:
-            for r_idx, row in raw_df.reset_index(drop=True).iterrows():
-                cols = st.columns([1.25] + [1.15] * len(value_cols), gap="small")
-                cols[0].markdown(str(row["BRAND"]))
-
-                for c_idx, col_name in enumerate(value_cols, start=1):
-                    val = float(row[col_name])
-                    label = format_int_id(val)
-
-                    clicked = cols[c_idx].button(
-                        label,
-                        key=f"brand_delta_click_{r_idx}_{c_idx}_{row['BRAND']}_{col_name}",
-                        use_container_width=True,
-                    )
-                    if clicked:
-                        st.session_state["selected_brand_delta_cell"] = {
-                            "brand": str(row["BRAND"]),
-                            "category": str(col_name),
-                            "value": val,
-                        }
-
-
-    def render_brand_team_detail_card(df_last: pd.DataFrame, df_this: pd.DataFrame):
-        selected = st.session_state.get("selected_brand_delta_cell")
-        if not selected:
-            st.info("Klik salah satu angka pada tabel Analisa Brand untuk menampilkan detail TEAM.")
-            return
-
-        selected_brand = selected.get("brand", "")
-        selected_kategori = selected.get("category", "")
-        selected_value = float(selected.get("value", 0))
-
-        category_map = {
-            "delta semua produk": None,
-            "delta laptop 2nd": ["LAPTOP 2ND", "LAPTOP SECOND", "LAPTOP 2NDHAND", "LAPTOP 2ND HAND"],
-            "delta laptop d": ["LAPTOP D", "LAPTOP-D", "LAPTOP D "],
-            "delta laptop R": ["LAPTOP R", "LAPTOP-R", "LAPTOP R "],
-            "delta aio": ["AIO", "ALL IN ONE", "ALL-IN-ONE"],
-            "delta pcdesktop": ["PCDESKTOP", "PC DESKTOP", "DESKTOP"],
-            "delta pcmini": ["PCMINI", "PC MINI", "MINI PC"],
-            "delta phone": ["PHONE", "SMARTPHONE", "HP ", "HANDPHONE"],
-            "delta tablet": ["TABLET", "TAB"],
-        }
-
-        keywords = category_map.get(selected_kategori)
-
-        if keywords is None:
-            df_last_team = df_last[df_last["BRAND"] == selected_brand].copy()
-            df_this_team = df_this[df_this["BRAND"] == selected_brand].copy()
-        else:
-            pattern = "|".join([re.escape(k) for k in keywords])
-            df_last_team = df_last[
-                (df_last["BRAND"] == selected_brand)
-                & (df_last["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
-            ].copy()
-            df_this_team = df_this[
-                (df_this["BRAND"] == selected_brand)
-                & (df_this["PRODUCT"].astype(str).str.upper().str.contains(pattern, na=False, regex=True))
-            ].copy()
-
-        last_team = df_last_team.groupby("TEAM", as_index=False).agg(QTY_LALU=("QTY", "sum"))
-        this_team = df_this_team.groupby("TEAM", as_index=False).agg(QTY_INI=("QTY", "sum"))
-        team_detail = this_team.merge(last_team, on="TEAM", how="outer").fillna(0.0)
-
-        st.markdown("<hr/>", unsafe_allow_html=True)
-        st.subheader("👥 Detail TEAM dari Analisa Brand")
-        st.caption(f"BRAND: {selected_brand} | Kolom: {proper_delta_header(selected_kategori)} | Delta: {format_int_id(selected_value)}")
-
-        if team_detail.empty:
-            st.info("Tidak ada data TEAM untuk cell ini.")
-            return
-
-        team_detail["DELTA"] = team_detail["QTY_INI"] - team_detail["QTY_LALU"]
-        team_detail["GROWTH_PCT"] = team_detail.apply(lambda r: safe_growth_pct(r["QTY_INI"], r["QTY_LALU"]), axis=1)
-
-        # Delta total TEAM dari semua product/brand, supaya konteks performa TEAM tetap kelihatan.
-        total_last_team = df_last.groupby("TEAM", as_index=False).agg(QTY_TOTAL_LALU=("QTY", "sum"))
-        total_this_team = df_this.groupby("TEAM", as_index=False).agg(QTY_TOTAL_INI=("QTY", "sum"))
-        total_team = total_this_team.merge(total_last_team, on="TEAM", how="outer").fillna(0.0)
-        total_team["DELTA_TOTAL"] = total_team["QTY_TOTAL_INI"] - total_team["QTY_TOTAL_LALU"]
-        team_detail = team_detail.merge(total_team[["TEAM", "DELTA_TOTAL"]], on="TEAM", how="left").fillna({"DELTA_TOTAL": 0.0})
-
-        def _top_delta_driver(df_last_src: pd.DataFrame, df_this_src: pd.DataFrame, dim_col: str, selected_team: str, direction_value: float, top_k: int = 3) -> str:
-            last_src = df_last_src[df_last_src["TEAM"] == selected_team].copy()
-            this_src = df_this_src[df_this_src["TEAM"] == selected_team].copy()
-
-            a = this_src.groupby(dim_col, as_index=False).agg(THIS=("QTY", "sum"))
-            b = last_src.groupby(dim_col, as_index=False).agg(LAST=("QTY", "sum"))
-            m = a.merge(b, on=dim_col, how="outer").fillna(0.0)
-            m[dim_col] = m[dim_col].astype(str).str.strip()
-            m = m[m[dim_col].ne("")].copy()
-            if m.empty:
-                return "-"
-
-            m["DELTA_DRIVER"] = m["THIS"] - m["LAST"]
-            if direction_value < 0:
-                m = m[m["DELTA_DRIVER"] < 0].sort_values("DELTA_DRIVER", ascending=True)
-            elif direction_value > 0:
-                m = m[m["DELTA_DRIVER"] > 0].sort_values("DELTA_DRIVER", ascending=False)
-            else:
-                m = m[m["DELTA_DRIVER"] != 0].copy()
-                m["ABS_DELTA_DRIVER"] = m["DELTA_DRIVER"].abs()
-                m = m.sort_values("ABS_DELTA_DRIVER", ascending=False)
-
-            if m.empty:
-                return "-"
-
-            def fmt_driver(row):
-                delta = float(row["DELTA_DRIVER"])
-                sign = "+" if delta > 0 else ""
-                return f"{row[dim_col]} ({sign}{int(delta):,})".replace(",", ".")
-
-            return ", ".join([fmt_driver(row) for _, row in m.head(top_k).iterrows()])
-
-        team_detail["Delta Platform"] = team_detail.apply(
-            lambda r: _top_delta_driver(df_last_team, df_this_team, "PLATFORM", r["TEAM"], r["DELTA"]),
-            axis=1,
-        )
-        team_detail["SKU/Spesifikasi (driver)"] = team_detail.apply(
-            lambda r: _top_delta_driver(df_last_team, df_this_team, "SPESIFIKASI", r["TEAM"], r["DELTA"]),
-            axis=1,
-        )
-
-        if selected_value < 0:
-            team_detail = team_detail.sort_values("DELTA", ascending=True)
-        else:
-            team_detail = team_detail.sort_values("DELTA", ascending=False)
-
-        team_detail["QTY Lalu"] = team_detail["QTY_LALU"].astype(int)
-        team_detail["QTY Ini"] = team_detail["QTY_INI"].astype(int)
-        team_detail["Delta"] = team_detail["DELTA"].astype(int)
-        team_detail["Growth %"] = team_detail["GROWTH_PCT"].apply(lambda x: float(x) if (x is not None and not pd.isna(x)) else np.nan)
-
-        detail_view = team_detail[
-            [
-                "TEAM",
-                "QTY Lalu",
-                "QTY Ini",
-                "Delta",
-                "Growth %",
-                "Delta Platform",
-                "SKU/Spesifikasi (driver)",
-            ]
-        ].copy()
-
-        st.dataframe(
-            style_growth_pct_df(detail_view),
-            use_container_width=True,
-            height=520,
-            hide_index=True,
-            column_config={
-                "TEAM": st.column_config.TextColumn("TEAM", width="small"),
-                "QTY Lalu": st.column_config.NumberColumn("QTY Lalu", width="small", format="%d"),
-                "QTY Ini": st.column_config.NumberColumn("QTY Ini", width="small", format="%d"),
-                "Delta": st.column_config.NumberColumn("Delta", width="small", format="%d"),
-                "Growth %": st.column_config.NumberColumn("Growth %", width="small", format="%.2f%%"),
-                "Delta Platform": st.column_config.TextColumn("Delta Platform", width="medium"),
-                "SKU/Spesifikasi (driver)": st.column_config.TextColumn("SKU/Spesifikasi (driver)", width="large"),
-            },
-        )
-
-
-
-
     def _render_analisa_penjualan_app_inner():
         render_header()
 
@@ -3229,20 +2985,6 @@ def render_analisa_penjualan_app():
             use_container_width=True,
             height=520,
         )
-
-
-        # =========================
-        # NEW CARD: BRAND DELTA ANALYSIS
-        # =========================
-        st.markdown("<hr/>", unsafe_allow_html=True)
-        st.subheader("🏷️ Analisa Brand")
-        st.caption("Delta QTY per BRAND dibanding periode lalu, dibagi berdasarkan kategori PRODUCT.")
-
-        brand_analysis_df = brand_delta_analysis_table_cached(df_last, df_this)
-        brand_analysis_raw_df = brand_delta_analysis_raw_cached(df_last, df_this)
-        render_clickable_brand_delta_table(brand_analysis_raw_df)
-        render_brand_team_detail_card(df_last, df_this)
-
 
         # =========================
         # Top tables
@@ -5111,7 +4853,7 @@ def render_update_stok_shopee():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_shopee_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_shopee",
         pricelist_file=pricelist_file,
         mode_key="stock_shopee_mode",
@@ -5129,7 +4871,7 @@ def render_update_stok_shopee():
             return
         try:
             result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing),
                 "Memproses update stok Shopee...",
             )
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5155,7 +4897,7 @@ def render_update_stok_tiktokshop():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_tiktokshop_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_tiktokshop",
         pricelist_file=pricelist_file,
         mode_key="stock_tiktokshop_mode",
@@ -5173,7 +4915,7 @@ def render_update_stok_tiktokshop():
             return
         try:
             result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing),
                 "Memproses update stok TikTokShop...",
             )
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5199,7 +4941,7 @@ def render_update_stok_bigseller():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_bigseller",
         pricelist_file=pricelist_file,
         mode_key="stock_bigseller_mode",
@@ -5217,7 +4959,7 @@ def render_update_stok_bigseller():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing),
                 "Memproses update stok Bigseller...",
             )
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
@@ -5245,7 +4987,7 @@ def render_update_stok_blibli():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_blibli_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_blibli",
         pricelist_file=pricelist_file,
         mode_key="stock_blibli_mode",
@@ -5263,7 +5005,7 @@ def render_update_stok_blibli():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing),
                 "Memproses update stok Blibli...",
             )
             cache_downloads("stock_blibli", result_name, result_bytes, issues_bytes, summary=summary)
@@ -5289,7 +5031,7 @@ def render_update_stok_akulaku():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_akulaku_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_akulaku",
         pricelist_file=pricelist_file,
         mode_key="stock_akulaku_mode",
@@ -5307,7 +5049,7 @@ def render_update_stok_akulaku():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, force_zero_if_missing),
                 "Memproses update stok Akulaku...",
             )
             cache_downloads("stock_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
