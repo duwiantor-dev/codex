@@ -5817,10 +5817,13 @@ def render_analisa_margin():
                 continue
 
             spec_col = get_header_col_fuzzy(ws, header_row, ["SPESIFIKASI", "Specification", "Nama Barang", "Nama Produk"])
-            brand_col = get_header_col_fuzzy(ws, header_row, ["BRAND", "Merk"])
             product_col = get_header_col_fuzzy(ws, header_row, ["PRODUCT", "Produk", "Category"])
             m0_col = price_cols["M0"]
             m4_col = price_cols["M4"]
+            try:
+                _, tot_col = find_tot_col(ws, header_row)
+            except Exception:
+                tot_col = None
 
             for r in range(header_row + 1, ws.max_row + 1):
                 if r in skip_rows:
@@ -5845,12 +5848,13 @@ def render_analisa_margin():
                 biaya = (m4 * 0.047) + 150
                 margin_rp = m4 - m0 - biaya
                 margin_pct = margin_rp / m4
+                stok_tot = to_int_or_none(ws.cell(row=r, column=tot_col).value) if tot_col else None
 
                 rows.append({
                     "KODEBARANG": sku,
                     "SPESIFIKASI": s_clean(ws.cell(row=r, column=spec_col).value) if spec_col else "",
-                    "BRAND": s_clean(ws.cell(row=r, column=brand_col).value) if brand_col else "",
                     "PRODUCT": s_clean(ws.cell(row=r, column=product_col).value) if product_col else "",
+                    "STOK TOT": int(stok_tot) if stok_tot is not None else "",
                     "M0": int(m0),
                     "M4": int(m4),
                     "Biaya 4.7% + 150": float(biaya),
@@ -5876,13 +5880,23 @@ def render_analisa_margin():
         x for x in df["PRODUCT"].dropna().astype(str).unique().tolist()
         if x.strip()
     ])
-    selected_products = st.multiselect(
-        "Filter by PRODUCT",
-        product_options,
-        default=[],
-        key="analisa_margin_product_filter",
-    )
 
+    if "analisa_margin_product_filter_applied" not in st.session_state:
+        st.session_state["analisa_margin_product_filter_applied"] = []
+
+    with st.form("analisa_margin_filter_form", clear_on_submit=False):
+        selected_products_temp = st.multiselect(
+            "Filter by PRODUCT",
+            product_options,
+            default=st.session_state["analisa_margin_product_filter_applied"],
+            key="analisa_margin_product_filter_temp",
+        )
+        apply_filter = st.form_submit_button("Konfirmasi Filter", use_container_width=True)
+
+    if apply_filter:
+        st.session_state["analisa_margin_product_filter_applied"] = selected_products_temp
+
+    selected_products = st.session_state["analisa_margin_product_filter_applied"]
     if selected_products:
         df = df[df["PRODUCT"].isin(selected_products)].copy()
 
