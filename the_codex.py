@@ -1228,15 +1228,38 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
     base_price = pl.get(price_key)
     if base_price is None:
         return None, f"Harga {price_key} kosong di Pricelist untuk SKU '{base_sku}'"
+
+    base_price_int = int(base_price)
+    has_aff = False
     addon_total = 0
     for addon in addons:
         code = normalize_addon_code(addon)
-        if code and code not in addon_map:
+        if not code:
+            continue
+
+        # Special trigger addon:
+        # KODEBARANG+AFF = harga barang naik 1%, lalu discount_rp tetap dikurangkan.
+        # Nilai AFF di file Addon Mapping tidak dipakai sebagai nominal tambah.
+        if code == "AFF":
+            has_aff = True
+            continue
+
+        if code not in addon_map:
             return None, f"Addon '{code}' tidak ada di file Addon Mapping"
         addon_total += int(addon_map.get(code, 0))
-    final_price = int(base_price) + addon_total - int(discount_rp)
+
+    if has_aff:
+        # Integer rounding: base_price * 1.01, dibulatkan ke rupiah terdekat.
+        price_before_discount = (base_price_int * 101 + 50) // 100
+    else:
+        price_before_discount = base_price_int
+
+    final_price = int(price_before_discount) + addon_total - int(discount_rp)
     if final_price <= 0:
         return None, f"Harga hasil {price_key} <= 0 untuk SKU '{base_sku}'"
+
+    if has_aff:
+        return final_price, f"{price_key} + AFF 1% + addon lain - diskon"
     return final_price, f"{price_key} + addon - diskon"
 
 
