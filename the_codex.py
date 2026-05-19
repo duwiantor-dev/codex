@@ -334,6 +334,7 @@ def process_marketplace_stock_sheet(
     chosen_areas: Set[str],
     chosen_gudangs: Set[str],
     zero_below: int,
+    zero_if_missing: bool = False,
     data_start: int,
     sku_col: int,
     qty_col: int,
@@ -347,7 +348,7 @@ def process_marketplace_stock_sheet(
             continue
         summary["rows_scanned"] += 1
         old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
         if new_qty is None:
             summary["rows_unmatched"] += 1
             issues.append({
@@ -646,11 +647,12 @@ def pick_stock_value(
     chosen_areas: Set[str],
     chosen_gudangs: Set[str],
     zero_below: int = 0,
+    zero_if_missing: bool = False,
 ) -> Optional[int]:
     base, _ = split_sku_addons(sku_full)
     base_key = norm_sku(base)
     if not base_key or base_key not in stock_lookup:
-        return None
+        return 0 if zero_if_missing else None
 
     rec = stock_lookup[base_key]
     tot = rec.get("TOT")
@@ -722,7 +724,7 @@ def find_shopee_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -736,7 +738,7 @@ def collect_changed_rows_stock_shopee(file_bytes: bytes, stock_lookup: Dict[str,
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -764,7 +766,7 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
     return workbook_to_bytes(out_wb)
 
 
-def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -772,7 +774,7 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
@@ -821,7 +823,7 @@ def find_tiktokshop_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[str, Dict], selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stats = {"rows_scanned": 0, "rows_written": 0, "rows_unchanged": 0, "rows_unmatched": 0}
     changed_rows: List[List[Any]] = []
     wb = load_workbook(io.BytesIO(file_bytes), read_only=True, data_only=False)
@@ -835,7 +837,7 @@ def collect_changed_rows_stock_tiktokshop(file_bytes: bytes, stock_lookup: Dict[
             continue
         stats["rows_scanned"] += 1
         old_qty = to_int_or_none(row_list[qty_col - 1] if len(row_list) >= qty_col else None)
-        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+        new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
         if new_qty is None:
             stats["rows_unmatched"] += 1
             continue
@@ -863,7 +865,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
-def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
@@ -871,7 +873,7 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
 
     for mf in mass_files:
         try:
-            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+            rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
         except Exception as e:
@@ -897,7 +899,7 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return header_row + 1, found_cols["sku"], found_cols["qty"]
 
 
-def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files))
@@ -942,7 +944,7 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
 
                 summary["rows_scanned"] += 1
                 old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
-                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below)
+                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
 
                 if new_qty is None:
                     summary["rows_unmatched"] += 1
@@ -1008,7 +1010,7 @@ def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
     return data_start, sku_col, qty_col, 0
 
 
-def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1026,6 +1028,7 @@ def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
             chosen_areas=chosen_areas,
             chosen_gudangs=chosen_gudangs,
             zero_below=zero_below,
+            zero_if_missing=zero_if_missing,
             data_start=data_start,
             sku_col=sku_col,
             qty_col=qty_col,
@@ -1055,7 +1058,7 @@ def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0):
+def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -1073,6 +1076,7 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
             chosen_areas=chosen_areas,
             chosen_gudangs=chosen_gudangs,
             zero_below=zero_below,
+            zero_if_missing=zero_if_missing,
             data_start=data_start,
             sku_col=sku_col,
             qty_col=qty_col,
@@ -1812,6 +1816,12 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
         help="Selain Stok Nasional (TOT), mode stok bisa dipilih lebih dari 1. Jika pilih TOT bersamaan dengan mode lain, hasil stok akan pakai TOT.",
     ))
     zero_below = st.number_input("Stok < angka ini jadi 0", min_value=0, value=0, step=1, key=f"{area_key_prefix}_zero_below")
+    zero_if_missing = st.toggle(
+        "SKU tidak ditemukan di Pricelist = 0",
+        value=False,
+        key=f"{area_key_prefix}_zero_if_missing",
+        help="Jika aktif, SKU yang tidak ditemukan di Pricelist stok akan diisi 0. Jika nonaktif, SKU tetap di-skip.",
+    )
 
     needs_lookup_data = bool(selected_modes & {"Default", "Area", "Gudang"})
 
@@ -1867,7 +1877,7 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
     elif "Gudang" in selected_modes and not chosen_gudangs:
         process_disabled = True
 
-    return selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled
+    return selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled
 
 
 def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
@@ -5111,7 +5121,7 @@ def render_update_stok_shopee():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_shopee_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_shopee",
         pricelist_file=pricelist_file,
         mode_key="stock_shopee_mode",
@@ -5129,7 +5139,7 @@ def render_update_stok_shopee():
             return
         try:
             result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
                 "Memproses update stok Shopee...",
             )
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5155,7 +5165,7 @@ def render_update_stok_tiktokshop():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_tiktokshop_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_tiktokshop",
         pricelist_file=pricelist_file,
         mode_key="stock_tiktokshop_mode",
@@ -5173,7 +5183,7 @@ def render_update_stok_tiktokshop():
             return
         try:
             result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
                 "Memproses update stok TikTokShop...",
             )
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5199,7 +5209,7 @@ def render_update_stok_bigseller():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_bigseller",
         pricelist_file=pricelist_file,
         mode_key="stock_bigseller_mode",
@@ -5217,7 +5227,7 @@ def render_update_stok_bigseller():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
                 "Memproses update stok Bigseller...",
             )
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
@@ -5245,7 +5255,7 @@ def render_update_stok_blibli():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_blibli_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_blibli",
         pricelist_file=pricelist_file,
         mode_key="stock_blibli_mode",
@@ -5263,7 +5273,7 @@ def render_update_stok_blibli():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
                 "Memproses update stok Blibli...",
             )
             cache_downloads("stock_blibli", result_name, result_bytes, issues_bytes, summary=summary)
@@ -5289,7 +5299,7 @@ def render_update_stok_akulaku():
     with c2:
         pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_akulaku_pl")
 
-    selected_modes, chosen_areas, chosen_gudangs, zero_below, process_disabled = render_stock_controls(
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_akulaku",
         pricelist_file=pricelist_file,
         mode_key="stock_akulaku_mode",
@@ -5307,7 +5317,7 @@ def render_update_stok_akulaku():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below),
+                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
                 "Memproses update stok Akulaku...",
             )
             cache_downloads("stock_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
