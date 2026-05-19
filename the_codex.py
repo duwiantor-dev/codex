@@ -5847,7 +5847,6 @@ def render_analisa_margin():
                 margin_pct = margin_rp / m4
 
                 rows.append({
-                    "Sheet": sheet_name,
                     "KODEBARANG": sku,
                     "SPESIFIKASI": s_clean(ws.cell(row=r, column=spec_col).value) if spec_col else "",
                     "BRAND": s_clean(ws.cell(row=r, column=brand_col).value) if brand_col else "",
@@ -5872,6 +5871,20 @@ def render_analisa_margin():
     if df.empty:
         st.warning("Tidak ada SKU valid. Pastikan sheet LAPTOP/TELCO/PC HOM ELE punya header KODEBARANG, M0, dan M4, serta M0/M4 tidak kosong.")
         return
+
+    product_options = sorted([
+        x for x in df["PRODUCT"].dropna().astype(str).unique().tolist()
+        if x.strip()
+    ])
+    selected_products = st.multiselect(
+        "Filter by PRODUCT",
+        product_options,
+        default=[],
+        key="analisa_margin_product_filter",
+    )
+
+    if selected_products:
+        df = df[df["PRODUCT"].isin(selected_products)].copy()
 
     c1, c2, c3 = st.columns(3)
     c1.metric("SKU Terbaca", len(df))
