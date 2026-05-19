@@ -5765,6 +5765,140 @@ def render_analisa_produk():
     except Exception as e:
         st.error(f"Gagal membuka fitur Analisa Produk: {e}")
 
+
+
+def render_analisa_margin():
+    st.title("Analisa Margin")
+    st.caption("Upload Pricelist untuk menghitung % margin per SKU dari sheet LAPTOP, TELCO, dan PC HOM ELE.")
+
+    pricelist_file = st.file_uploader("Upload Pricelist (.xlsx)", type=["xlsx"], key="analisa_margin_pricelist")
+    if pricelist_file is None:
+        st.info("Upload Pricelist dulu.")
+        return
+
+    def _format_idr_local(x):
+        try:
+            return f"IDR {int(round(float(x))):,}".replace(",", ".")
+        except Exception:
+            return "-"
+
+    def _format_pct_local(x):
+        try:
+            return f"{float(x) * 100:.2f}%"
+        except Exception:
+            return "-"
+
+    def _coming_rows_to_skip(ws: Worksheet) -> Set[int]:
+        skip: Set[int] = set()
+        r_start = find_row_contains(ws, "COMING", scan_rows=600)
+        r_end = find_row_contains(ws, "END COMING", scan_rows=1200)
+        if r_start and r_end and r_end >= r_start:
+            skip = set(range(r_start, r_end + 1))
+        return skip
+
+    def _build_margin_df(pl_bytes: bytes) -> pd.DataFrame:
+        wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
+        target_sheets = ["LAPTOP", "TELCO", "PC HOM ELE"]
+        rows: List[Dict[str, Any]] = []
+        issues: List[str] = []
+
+        for sheet_name in target_sheets:
+            if sheet_name not in wb.sheetnames:
+                issues.append(f"Sheet {sheet_name} tidak ditemukan.")
+                continue
+
+            ws = wb[sheet_name]
+            skip_rows = _coming_rows_to_skip(ws) if su(sheet_name) == "LAPTOP" else set()
+
+            try:
+                header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, ["M0", "M4"])
+            except Exception as e:
+                issues.append(f"Sheet {sheet_name}: {e}")
+                continue
+
+            spec_col = get_header_col_fuzzy(ws, header_row, ["SPESIFIKASI", "Specification", "Nama Barang", "Nama Produk"])
+            brand_col = get_header_col_fuzzy(ws, header_row, ["BRAND", "Merk"])
+            product_col = get_header_col_fuzzy(ws, header_row, ["PRODUCT", "Produk", "Category"])
+            m0_col = price_cols["M0"]
+            m4_col = price_cols["M4"]
+
+            for r in range(header_row + 1, ws.max_row + 1):
+                if r in skip_rows:
+                    continue
+
+                sku = norm_sku(ws.cell(row=r, column=sku_col).value)
+                if not sku or sku in ("TOTAL", "KODEBARANG", "KODE BARANG"):
+                    continue
+
+                m0 = parse_price_cell(ws.cell(row=r, column=m0_col).value)
+                m4 = parse_price_cell(ws.cell(row=r, column=m4_col).value)
+                if m0 is None or m0 <= 0:
+                    continue
+                if m4 is None or m4 <= 0:
+                    continue
+
+                m0 = apply_multiplier_if_needed(m0)
+                m4 = apply_multiplier_if_needed(m4)
+                if m4 <= 0:
+                    continue
+
+                biaya = (m4 * 0.047) + 150
+                margin_rp = m4 - m0 - biaya
+                margin_pct = margin_rp / m4
+
+                rows.append({
+                    "Sheet": sheet_name,
+                    "KODEBARANG": sku,
+                    "SPESIFIKASI": s_clean(ws.cell(row=r, column=spec_col).value) if spec_col else "",
+                    "BRAND": s_clean(ws.cell(row=r, column=brand_col).value) if brand_col else "",
+                    "PRODUCT": s_clean(ws.cell(row=r, column=product_col).value) if product_col else "",
+                    "M0": int(m0),
+                    "M4": int(m4),
+                    "Biaya 4.7% + 150": float(biaya),
+                    "Margin Rp": float(margin_rp),
+                    "Margin %": float(margin_pct),
+                })
+
+        if issues:
+            st.warning(" | ".join(issues))
+        return pd.DataFrame(rows)
+
+    try:
+        df = _build_margin_df(pricelist_file.getvalue())
+    except Exception as e:
+        st.error(f"Gagal membaca Pricelist: {e}")
+        return
+
+    if df.empty:
+        st.warning("Tidak ada SKU valid. Pastikan sheet LAPTOP/TELCO/PC HOM ELE punya header KODEBARANG, M0, dan M4, serta M0/M4 tidak kosong.")
+        return
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("SKU Terbaca", len(df))
+    c2.metric("Margin Minus", int((df["Margin %"] < 0).sum()))
+    c3.metric("Rata-rata Margin", _format_pct_local(df["Margin %"].mean()))
+
+    sort_mode = st.radio(
+        "Urutan Margin",
+        ["Small to Large", "Large to Small"],
+        horizontal=True,
+        key="analisa_margin_sort_mode",
+    )
+    ascending = sort_mode == "Small to Large"
+    view = df.sort_values("Margin %", ascending=ascending).copy()
+
+    view_display = view.copy()
+    for col in ["M0", "M4", "Biaya 4.7% + 150", "Margin Rp"]:
+        view_display[col] = view_display[col].map(_format_idr_local)
+    view_display["Margin %"] = view_display["Margin %"].map(_format_pct_local)
+
+    st.dataframe(
+        view_display,
+        use_container_width=True,
+        hide_index=True,
+        height=650,
+    )
+
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
 
@@ -5840,13 +5974,15 @@ def build_menu() -> str:
     elif group == "Analisa":
         child = st.sidebar.radio(
             "Pilih Fitur Analisa",
-            ["Analisa Penjualan", "Analisa Produk"],
+            ["Analisa Penjualan", "Analisa Produk", "Analisa Margin"],
             key="sidebar_analisa_menu",
         )
         if child == "Analisa Penjualan":
             route = "analisa_penjualan"
-        else:
+        elif child == "Analisa Produk":
             route = "analisa_produk_stok"
+        else:
+            route = "analisa_margin"
 
     else:
         route = "dashboard"
@@ -5902,6 +6038,8 @@ def main():
         render_analisa_penjualan()
     elif route == "analisa_produk_stok":
         render_analisa_produk()
+    elif route == "analisa_margin":
+        render_analisa_margin()
     else:
         st.error("Menu tidak dikenal.")
 
