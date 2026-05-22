@@ -5772,18 +5772,16 @@ def render_analisa_margin():
     st.caption("Upload Pricelist untuk menghitung % margin per SKU dari sheet LAPTOP, TELCO, dan PC HOM ELE.")
 
     pricelist_file = st.file_uploader("Upload Pricelist (.xlsx)", type=["xlsx"], key="analisa_margin_pricelist")
-    if pricelist_file is None:
-        st.info("Upload Pricelist dulu.")
-        return
-
-    selected_price_key = st.radio(
-        "Harga Pembanding",
+    harga_margin_key = st.radio(
+        "Pilih Harga untuk Analisa Margin",
         ["M3", "M4"],
         index=1,
         horizontal=True,
-        key="analisa_margin_price_key",
-        help="Pilih kolom harga yang dipakai untuk menghitung biaya dan margin terhadap M0.",
+        key="analisa_margin_harga_key",
     )
+    if pricelist_file is None:
+        st.info("Upload Pricelist dulu.")
+        return
 
     def _format_idr_local(x):
         try:
@@ -5805,7 +5803,7 @@ def render_analisa_margin():
             skip = set(range(r_start, r_end + 1))
         return skip
 
-    def _build_margin_df(pl_bytes: bytes, price_key: str) -> pd.DataFrame:
+    def _build_margin_df(pl_bytes: bytes, harga_key: str) -> pd.DataFrame:
         wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
         target_sheets = ["LAPTOP", "TELCO", "PC HOM ELE"]
         rows: List[Dict[str, Any]] = []
@@ -5820,7 +5818,7 @@ def render_analisa_margin():
             skip_rows = _coming_rows_to_skip(ws) if su(sheet_name) == "LAPTOP" else set()
 
             try:
-                header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, ["M0", price_key])
+                header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, ["M0", harga_key])
             except Exception as e:
                 issues.append(f"Sheet {sheet_name}: {e}")
                 continue
@@ -5828,7 +5826,7 @@ def render_analisa_margin():
             spec_col = get_header_col_fuzzy(ws, header_row, ["SPESIFIKASI", "Specification", "Nama Barang", "Nama Produk"])
             product_col = get_header_col_fuzzy(ws, header_row, ["PRODUCT", "Produk", "Category"])
             m0_col = price_cols["M0"]
-            selected_price_col = price_cols[price_key]
+            harga_col = price_cols[harga_key]
             try:
                 _, tot_col = find_tot_col(ws, header_row)
             except Exception:
@@ -5843,20 +5841,20 @@ def render_analisa_margin():
                     continue
 
                 m0 = parse_price_cell(ws.cell(row=r, column=m0_col).value)
-                selected_price = parse_price_cell(ws.cell(row=r, column=selected_price_col).value)
+                harga_jual = parse_price_cell(ws.cell(row=r, column=harga_col).value)
                 if m0 is None or m0 <= 0:
                     continue
-                if selected_price is None or selected_price <= 0:
+                if harga_jual is None or harga_jual <= 0:
                     continue
 
                 m0 = apply_multiplier_if_needed(m0)
-                selected_price = apply_multiplier_if_needed(selected_price)
-                if selected_price <= 0:
+                harga_jual = apply_multiplier_if_needed(harga_jual)
+                if harga_jual <= 0:
                     continue
 
-                biaya = (selected_price * 0.047) + 150
-                margin_rp = selected_price - m0 - biaya
-                margin_pct = margin_rp / selected_price
+                biaya = (harga_jual * 0.047) + 150
+                margin_rp = harga_jual - m0 - biaya
+                margin_pct = margin_rp / harga_jual
                 stok_tot = to_int_or_none(ws.cell(row=r, column=tot_col).value) if tot_col else None
 
                 rows.append({
@@ -5865,7 +5863,7 @@ def render_analisa_margin():
                     "PRODUCT": s_clean(ws.cell(row=r, column=product_col).value) if product_col else "",
                     "STOK TOT": int(stok_tot) if stok_tot is not None else "",
                     "M0": int(m0),
-                    price_key: int(selected_price),
+                    harga_key: int(harga_jual),
                     "Biaya 4.7% + 150": float(biaya),
                     "Margin Rp": float(margin_rp),
                     "Margin %": float(margin_pct),
@@ -5876,13 +5874,13 @@ def render_analisa_margin():
         return pd.DataFrame(rows)
 
     try:
-        df = _build_margin_df(pricelist_file.getvalue(), selected_price_key)
+        df = _build_margin_df(pricelist_file.getvalue(), harga_margin_key)
     except Exception as e:
         st.error(f"Gagal membaca Pricelist: {e}")
         return
 
     if df.empty:
-        st.warning(f"Tidak ada SKU valid. Pastikan sheet LAPTOP/TELCO/PC HOM ELE punya header KODEBARANG, M0, dan {selected_price_key}, serta M0/{selected_price_key} tidak kosong.")
+        st.warning(f"Tidak ada SKU valid. Pastikan sheet LAPTOP/TELCO/PC HOM ELE punya header KODEBARANG, M0, dan {harga_margin_key}, serta M0/{harga_margin_key} tidak kosong.")
         return
 
     product_options = sorted([
@@ -5924,9 +5922,8 @@ def render_analisa_margin():
     view = df.sort_values("Margin %", ascending=ascending).copy()
 
     view_display = view.copy()
-    for col in ["M0", selected_price_key, "Biaya 4.7% + 150", "Margin Rp"]:
-        if col in view_display.columns:
-            view_display[col] = view_display[col].map(_format_idr_local)
+    for col in ["M0", harga_margin_key, "Biaya 4.7% + 150", "Margin Rp"]:
+        view_display[col] = view_display[col].map(_format_idr_local)
     view_display["Margin %"] = view_display["Margin %"].map(_format_pct_local)
 
     st.dataframe(
