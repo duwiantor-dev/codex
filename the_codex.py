@@ -891,10 +891,30 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
 def find_mwh_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     header_row = 3
     data_start = 6
-    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Penjual", "Seller SKU"])
-    qty_col = get_header_col_fuzzy(ws, header_row, ["Jumlah", "Kuantitas", "Quantity"])
+
+    sku_col = get_header_col_fuzzy(
+        ws,
+        header_row,
+        ["SKU Penjual", "Seller SKU"]
+    )
+
+    qty_col = None
+
+    for c in range(1, ws.max_column + 1):
+        header_val = su(ws.cell(header_row, c).value)
+
+        if (
+            "JUMLAH DI" in header_val
+            or header_val == "JUMLAH"
+            or header_val == "KUANTITAS"
+            or header_val == "QUANTITY"
+        ):
+            qty_col = c
+            break
+
     if sku_col is None or qty_col is None:
         raise ValueError("Kolom SKU/Jumlah tidak ketemu pada template Mwh.")
+
     return data_start, sku_col, qty_col
 
 
