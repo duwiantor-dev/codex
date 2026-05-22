@@ -42,6 +42,7 @@ SESSION_DEFAULTS = {
     "summary_cache": {},
     "stock_shopee_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_tiktokshop_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "stock_mwh_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_bigseller_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_blibli_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_akulaku_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
@@ -887,6 +888,67 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
     return result_bytes, issues_workbook_or_none(issues), summary
 
 
+def find_mwh_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
+    header_row = 3
+    data_start = 6
+    sku_col = get_header_col_fuzzy(ws, header_row, ["SKU Penjual", "Seller SKU"])
+    qty_col = get_header_col_fuzzy(ws, header_row, ["Jumlah", "Kuantitas", "Quantity"])
+    if sku_col is None or qty_col is None:
+        raise ValueError("Kolom SKU/Jumlah tidak ketemu pada template Mwh.")
+    return data_start, sku_col, qty_col
+
+
+def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = init_summary(len(mass_files), include_unchanged=True)
+
+    for mf in mass_files:
+        try:
+            wb = load_workbook(io.BytesIO(mf.getvalue()))
+            ws = wb.active
+            data_start, sku_col, qty_col = find_mwh_stock_columns(ws)
+
+            for r in range(data_start, ws.max_row + 1):
+                sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+                if not sku_full:
+                    continue
+                summary["rows_scanned"] += 1
+                old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+                new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
+
+                if new_qty is None:
+                    summary["rows_unmatched"] += 1
+                    issues.append({
+                        "file": mf.name,
+                        "row": r,
+                        "sku_full": sku_full,
+                        "old_value": old_qty,
+                        "new_value": "",
+                        "reason": "SKU tidak ditemukan di Pricelist stok",
+                    })
+                    continue
+
+                if old_qty is not None and int(old_qty) == int(new_qty):
+                    summary["rows_unchanged"] += 1
+                    continue
+
+                safe_set_cell_value(ws, r, qty_col, int(new_qty))
+                summary["rows_written"] += 1
+
+            output_files.append((f"hasil_update_stok_mwh_{mf.name}", workbook_to_bytes(wb)))
+        except Exception as e:
+            issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
+
+    if summary["rows_written"] == 0 and not issues:
+        issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
+
+    summary["issues_count"] = len(issues)
+    result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_mwh.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
+
+
 def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     header_row, found_cols = find_header_row_by_candidates(
         ws,
@@ -1406,6 +1468,52 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
 
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_tiktokshop.zip")
+    return result_bytes, result_name, issues_workbook_or_none(issues), summary
+
+
+def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
+    addon_map = load_addon_map_generic(addon_file.getvalue())
+    issues: List[Dict[str, Any]] = []
+    output_files: List[Tuple[str, bytes]] = []
+    summary = init_summary(len(mass_files), include_unchanged=True)
+
+    for mf in mass_files:
+        try:
+            wb = load_workbook(io.BytesIO(mf.getvalue()))
+            ws = wb.active
+            sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
+            price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
+            if sku_col is None or price_col is None:
+                issues.append({"file": mf.name, "reason": "Header mass update Mwh tidak sesuai."})
+                continue
+
+            for r in range(6, ws.max_row + 1):
+                sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+                if not sku_full:
+                    continue
+                summary["rows_scanned"] += 1
+                old_price = parse_price_cell(ws.cell(row=r, column=price_col).value)
+                new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
+                if new_price is None:
+                    summary["rows_unmatched"] += 1
+                    issues.append({"file": mf.name, "row": r, "sku_full": sku_full, "old_value": old_price, "new_value": "", "reason": reason})
+                    continue
+                if old_price is not None and int(old_price) == int(new_price):
+                    summary["rows_unchanged"] += 1
+                    continue
+                safe_set_cell_value(ws, r, price_col, int(new_price))
+                summary["rows_written"] += 1
+
+            output_files.append((f"hasil_harga_normal_mwh_{mf.name}", workbook_to_bytes(wb)))
+        except Exception as e:
+            issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
+
+    if summary["rows_written"] == 0 and not issues:
+        issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
+
+    summary["issues_count"] = len(issues)
+    result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_mwh.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
@@ -5217,6 +5325,52 @@ def render_update_stok_tiktokshop():
     render_downloads("stock_tiktokshop")
 
 
+
+
+def render_update_stok_mwh():
+    page_header(
+        "Update Stok Mwh",
+        "Memproses file mass update Mwh berdasarkan stok dari pricelist. Baris yang tidak berubah tetap dipertahankan di output.",
+        [
+            "Mass Update Mwh (.xlsx, Unprotect dulu)",
+            "Pricelist (.xlsx, tidak perlu ada yang di ubah)",
+            "Header stok Mwh harus berisi kolom Jumlah.",
+        ],
+    )
+    c1, c2 = st.columns(2)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update Mwh", type=["xlsx"], accept_multiple_files=True, key="stock_mwh_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_mwh_pl")
+
+    selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
+        area_key_prefix="stock_mwh",
+        pricelist_file=pricelist_file,
+        mode_key="stock_mwh_mode",
+        loaded_areas_key="stock_mwh_areas_loaded",
+        load_button_key="load_area_mwh",
+    )
+
+    if st.button("Proses", key="btn_stock_mwh", disabled=process_disabled):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if pricelist_file is None:
+            st.error("Upload Pricelist dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_mwh_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+                "Memproses update stok Mwh...",
+            )
+            cache_downloads("stock_mwh", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("stock_mwh")
+    render_downloads("stock_mwh")
+
 def render_update_stok_bigseller():
     page_header(
         "Update Stok Bigseller",
@@ -5538,6 +5692,51 @@ def render_harga_normal_tiktokshop():
     render_cached_summary("normal_tiktokshop")
     render_downloads("normal_tiktokshop")
 
+
+
+
+def render_harga_normal_mwh():
+    page_header(
+        "Harga Normal Mwh",
+        "Mengubah harga normal Mwh berdasarkan pricelist dan addon mapping. Baris yang tidak berubah tetap dipertahankan di output.",
+        ["Template Mass Update Mwh (.xlsx, Unprotect dulu)", "Pricelist (.xlsx, tidak perlu ada yang di ubah)", "Addon Mapping (.xlsx)"],
+    )
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        mass_files = st.file_uploader("Upload Mass Update Mwh", type=["xlsx"], accept_multiple_files=True, key="normal_mwh_mass")
+    with c2:
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="normal_mwh_pl")
+    with c3:
+        addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_mwh_add")
+    price_key = st.radio(
+        "Ambil Harga dari Pricelist",
+        ["M3", "M4"],
+        horizontal=True,
+        key="normal_mwh_price_key",
+    )
+    discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_mwh_disc")
+
+    if st.button("Proses", key="btn_normal_mwh"):
+        err = validate_mass_uploads(mass_files)
+        if err:
+            st.error(err)
+            return
+        if not pricelist_file or not addon_file:
+            st.error("Upload Pricelist dan Addon Mapping dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_mwh_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, price_key
+                ),
+                "Memproses harga normal Mwh...",
+            )
+            cache_downloads("normal_mwh", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("normal_mwh")
+    render_downloads("normal_mwh")
 
 def render_harga_coret_tiktokshop():
     page_header(
@@ -5948,13 +6147,15 @@ def build_menu() -> str:
     elif group == "Update Stok":
         child = st.sidebar.radio(
             "Pilih Platform",
-            ["Shopee (Mall & Star)", "TikTokShop", "Bigseller", "Blibli", "Akulaku"],
+            ["Shopee (Mall & Star)", "TikTokShop", "Mwh", "Bigseller", "Blibli", "Akulaku"],
             key="sidebar_update_stok_menu",
         )
         if child.startswith("Shopee"):
             route = "update_stok_shopee"
         elif child == "TikTokShop":
             route = "update_stok_tiktokshop"
+        elif child == "Mwh":
+            route = "update_stok_mwh"
         elif child == "Bigseller":
             route = "update_stok_bigseller"
         elif child == "Blibli":
@@ -5965,13 +6166,15 @@ def build_menu() -> str:
     elif group == "Update Harga Normal":
         child = st.sidebar.radio(
             "Pilih Platform",
-            ["Shopee (Mall & Star)", "TikTokShop", "PowerMerchant", "Bigseller", "Blibli", "Akulaku"],
+            ["Shopee (Mall & Star)", "TikTokShop", "Mwh", "PowerMerchant", "Bigseller", "Blibli", "Akulaku"],
             key="sidebar_harga_normal_menu",
         )
         if child.startswith("Shopee"):
             route = "harga_normal_shopee"
         elif child == "TikTokShop":
             route = "harga_normal_tiktokshop"
+        elif child == "Mwh":
+            route = "harga_normal_mwh"
         elif child == "PowerMerchant":
             route = "harga_normal_powermerchant"
         elif child == "Bigseller":
@@ -6040,6 +6243,8 @@ def main():
         render_update_stok_shopee()
     elif route == "update_stok_tiktokshop":
         render_update_stok_tiktokshop()
+    elif route == "update_stok_mwh":
+        render_update_stok_mwh()
     elif route == "update_stok_bigseller":
         render_update_stok_bigseller()
     elif route == "update_stok_blibli":
@@ -6050,6 +6255,8 @@ def main():
         render_harga_normal_shopee()
     elif route == "harga_normal_tiktokshop":
         render_harga_normal_tiktokshop()
+    elif route == "harga_normal_mwh":
+        render_harga_normal_mwh()
     elif route == "harga_normal_powermerchant":
         render_harga_normal_powemerchant()
     elif route == "harga_normal_bigseller":
