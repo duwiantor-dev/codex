@@ -191,6 +191,101 @@ def get_header_col_fuzzy(ws: Worksheet, header_row: int, candidates: List[str]) 
             return normalized[target]
     return None
 
+# Global header keywords for marketplace templates.
+# Match is intentionally "contains" so template updates such as
+# "Retail Price (Local Currency)" or "The stock quantity of the product"
+# can still be detected without adding the full exact header text.
+GLOBAL_SKU_HEADER_KEYWORDS = [
+    "SKU PENJUAL",
+    "SELLER SKU",
+    "SKU PRODUK",
+    "PRODUCT SKU",
+    "SKU",
+    "KODEBARANG",
+    "KODE BARANG",
+]
+
+GLOBAL_PRICE_HEADER_KEYWORDS = [
+    "HARGA",
+    "PRICE",
+    "RETAIL PRICE",
+    "HARGA RITEL",
+]
+
+GLOBAL_QTY_HEADER_KEYWORDS = [
+    "STOK",
+    "STOCK",
+    "QTY",
+    "QUANTITY",
+    "KUANTITAS",
+    "JUMLAH",
+]
+
+
+def _norm_header_contains_text(x) -> str:
+    return re.sub(r"\s+", " ", su(x))
+
+
+def find_header_col_contains(ws: Worksheet, header_row: int, keywords: List[str]) -> Optional[int]:
+    normalized_keywords = [_norm_header_contains_text(k) for k in keywords if _norm_header_contains_text(k)]
+    for c in range(1, ws.max_column + 1):
+        header = _norm_header_contains_text(ws.cell(header_row, c).value)
+        if not header:
+            continue
+        if any(keyword in header for keyword in normalized_keywords):
+            return c
+    return None
+
+
+def find_header_col_contains_any_row(
+    ws: Worksheet,
+    keywords: List[str],
+    scan_rows: int = 10,
+) -> Tuple[Optional[int], Optional[int]]:
+    for r in range(1, min(scan_rows, ws.max_row) + 1):
+        col = find_header_col_contains(ws, r, keywords)
+        if col is not None:
+            return r, col
+    return None, None
+
+
+def find_global_marketplace_columns(
+    ws: Worksheet,
+    *,
+    need_price: bool = False,
+    need_qty: bool = False,
+    scan_rows: int = 10,
+    default_data_start: Optional[int] = None,
+) -> Tuple[int, int, Optional[int], Optional[int]]:
+    header_rows: List[int] = []
+
+    sku_header_row, sku_col = find_header_col_contains_any_row(ws, GLOBAL_SKU_HEADER_KEYWORDS, scan_rows)
+    if sku_header_row is not None:
+        header_rows.append(sku_header_row)
+
+    price_col: Optional[int] = None
+    if need_price:
+        price_header_row, price_col = find_header_col_contains_any_row(ws, GLOBAL_PRICE_HEADER_KEYWORDS, scan_rows)
+        if price_header_row is not None:
+            header_rows.append(price_header_row)
+
+    qty_col: Optional[int] = None
+    if need_qty:
+        qty_header_row, qty_col = find_header_col_contains_any_row(ws, GLOBAL_QTY_HEADER_KEYWORDS, scan_rows)
+        if qty_header_row is not None:
+            header_rows.append(qty_header_row)
+
+    if sku_col is None:
+        raise ValueError("Kolom SKU tidak ditemukan.")
+    if need_price and price_col is None:
+        raise ValueError("Kolom harga/price tidak ditemukan.")
+    if need_qty and qty_col is None:
+        raise ValueError("Kolom stok/quantity tidak ditemukan.")
+
+    header_row = max(header_rows) if header_rows else 3
+    data_start = default_data_start if default_data_start is not None else header_row + 1
+    return data_start, sku_col, price_col, qty_col
+
 
 def find_header_row_by_exact(ws: Worksheet, header_text: str, scan_rows: int = 150) -> Optional[int]:
     target = su(header_text)
@@ -790,36 +885,25 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
 
 
 def find_tiktokshop_columns_readonly(ws) -> Tuple[int, int, int]:
-    header_row = 3
-    data_start = 6
-    qty_headers = {"KUANTITAS", "JUMLAH DI SHOP LOCATION", "QUANTITY"}
-    row_vals = list(ws.iter_rows(min_row=header_row, max_row=header_row, values_only=True))[0]
-    sku_col = None
-    qty_col = None
-    for idx, val in enumerate(row_vals, start=1):
-        v = su(val)
-        if v in ("SKU PENJUAL", "SELLER SKU"):
-            sku_col = idx
-        if v in qty_headers:
-            qty_col = idx
-    if not sku_col or not qty_col:
+    data_start, sku_col, _, qty_col = find_global_marketplace_columns(
+        ws,
+        need_qty=True,
+        scan_rows=10,
+        default_data_start=6,
+    )
+    if qty_col is None:
         raise ValueError("Kolom SKU/stok tidak ketemu pada template TikTokShop.")
     return data_start, sku_col, qty_col
 
 
 def find_tiktokshop_columns_normal(ws: Worksheet) -> Tuple[int, int, int]:
-    header_row = 3
-    data_start = 6
-    qty_headers = {"KUANTITAS", "JUMLAH DI SHOP LOCATION", "QUANTITY"}
-    sku_col = None
-    qty_col = None
-    for c in range(1, ws.max_column + 1):
-        v = su(ws.cell(header_row, c).value)
-        if v in ("SKU PENJUAL", "SELLER SKU"):
-            sku_col = c
-        if v in qty_headers:
-            qty_col = c
-    if not sku_col or not qty_col:
+    data_start, sku_col, _, qty_col = find_global_marketplace_columns(
+        ws,
+        need_qty=True,
+        scan_rows=10,
+        default_data_start=6,
+    )
+    if qty_col is None:
         raise ValueError("Kolom SKU/stok tidak ketemu pada template TikTokShop.")
     return data_start, sku_col, qty_col
 
@@ -1453,14 +1537,19 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
-        sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
-        price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
-        if sku_col is None or price_col is None:
-            issues.append({"file": mf.name, "reason": "Header mass update TikTokShop tidak sesuai."})
+        try:
+            data_start, sku_col, price_col, _ = find_global_marketplace_columns(
+                ws,
+                need_price=True,
+                scan_rows=10,
+                default_data_start=6,
+            )
+        except Exception as e:
+            issues.append({"file": mf.name, "reason": f"Header mass update TikTokShop tidak sesuai: {e}"})
             continue
 
         changed_rows: List[int] = []
-        for r in range(6, ws.max_row + 1):
+        for r in range(data_start, ws.max_row + 1):
             sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
             if not sku_full:
                 continue
@@ -1479,7 +1568,7 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
 
         if changed_rows:
             keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
+            for r in range(ws.max_row, data_start - 1, -1):
                 if r not in keep:
                     ws.delete_rows(r, 1)
         else:
@@ -1502,13 +1591,18 @@ def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: An
         try:
             wb = load_workbook(io.BytesIO(mf.getvalue()))
             ws = wb.active
-            sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
-            price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
-            if sku_col is None or price_col is None:
-                issues.append({"file": mf.name, "reason": "Header mass update Mwh tidak sesuai."})
+            try:
+                data_start, sku_col, price_col, _ = find_global_marketplace_columns(
+                    ws,
+                    need_price=True,
+                    scan_rows=10,
+                    default_data_start=6,
+                )
+            except Exception as e:
+                issues.append({"file": mf.name, "reason": f"Header mass update Mwh tidak sesuai: {e}"})
                 continue
 
-            for r in range(6, ws.max_row + 1):
+            for r in range(data_start, ws.max_row + 1):
                 sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
                 if not sku_full:
                     continue
@@ -1547,14 +1641,19 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
     for mf in mass_files:
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
-        sku_col = get_header_col_fuzzy(ws, 3, ["SKU Penjual", "Seller SKU"])
-        price_col = get_header_col_fuzzy(ws, 3, ["Harga Ritel (Mata Uang Lokal)", "Harga", "Price"])
-        if sku_col is None or price_col is None:
-            issues.append({"file": mf.name, "reason": "Header mass update PowerMerchant tidak sesuai."})
+        try:
+            data_start, sku_col, price_col, _ = find_global_marketplace_columns(
+                ws,
+                need_price=True,
+                scan_rows=10,
+                default_data_start=6,
+            )
+        except Exception as e:
+            issues.append({"file": mf.name, "reason": f"Header mass update PowerMerchant tidak sesuai: {e}"})
             continue
 
         changed_rows: List[int] = []
-        for r in range(6, ws.max_row + 1):
+        for r in range(data_start, ws.max_row + 1):
             sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
             if not sku_full:
                 continue
@@ -1573,7 +1672,7 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
 
         if changed_rows:
             keep = set(changed_rows)
-            for r in range(ws.max_row, 5, -1):
+            for r in range(ws.max_row, data_start - 1, -1):
                 if r not in keep:
                     ws.delete_rows(r, 1)
         else:
