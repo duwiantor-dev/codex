@@ -15,7 +15,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "Codexid version.9"
+APP_TITLE = "Codexid version.8"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
