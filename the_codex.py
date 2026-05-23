@@ -1962,6 +1962,177 @@ def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, ad
 
 
 
+def find_col_by_contains_on_row(
+    ws: Worksheet,
+    header_row: int,
+    keywords: List[str],
+    *,
+    exclude_keywords: Optional[List[str]] = None,
+) -> Optional[int]:
+    return find_col_contains_in_row(ws, header_row, keywords, exclude_keywords=exclude_keywords)
+
+
+def find_header_row_with_columns(
+    ws: Worksheet,
+    required: Dict[str, Tuple[List[str], Optional[List[str]]]],
+    *,
+    scan_rows: int = 10,
+) -> Tuple[int, Dict[str, int]]:
+    """Cari header secara global/contains untuk beberapa kolom wajib."""
+    for r in range(1, min(scan_rows, ws.max_row) + 1):
+        found: Dict[str, int] = {}
+        ok = True
+        for key, cfg in required.items():
+            keywords, excludes = cfg
+            col = find_col_by_contains_on_row(ws, r, keywords, exclude_keywords=excludes)
+            if col is None:
+                ok = False
+                break
+            found[key] = col
+        if ok:
+            return r, found
+    raise ValueError("Header tidak ditemukan. Pastikan kolom wajib tersedia.")
+
+
+def get_optional_col_contains(ws: Worksheet, header_row: int, keywords: List[str], *, exclude_keywords: Optional[List[str]] = None) -> Optional[int]:
+    return find_col_by_contains_on_row(ws, header_row, keywords, exclude_keywords=exclude_keywords)
+
+
+def get_row_values(ws: Worksheet, row: int, max_col: Optional[int] = None) -> List[Any]:
+    max_col = max_col or ws.max_column
+    return [ws.cell(row=row, column=c).value for c in range(1, max_col + 1)]
+
+
+
+def process_shopee_campaign(mass_file: Any, campaign_file: Any):
+    issues: List[Dict[str, Any]] = []
+    summary = init_summary(1)
+
+    try:
+        mass_wb = load_workbook(io.BytesIO(mass_file.getvalue()), data_only=False)
+        mass_ws = mass_wb.active
+
+        mass_header_row, mass_cols = find_header_row_with_columns(
+            mass_ws,
+            {
+                "product_id": (["KODE PRODUK", "PRODUCT ID"], None),
+                "product_name": (["NAMA PRODUK", "PRODUCT NAME"], None),
+                "variation_id": (["KODE VARIASI", "VARIATION ID"], None),
+                "variation_name": (["NAMA VARIASI", "VARIATION NAME"], None),
+                "sku": (["SKU"], ["SKU INDUK", "PARENT SKU", "SKU ID", "ID SKU"]),
+            },
+            scan_rows=10,
+        )
+
+        price_col = get_optional_col_contains(mass_ws, mass_header_row, ["HARGA", "PRICE"])
+        stock_col = get_optional_col_contains(mass_ws, mass_header_row, ["STOK", "STOCK", "QUANTITY", "KUANTITAS", "JUMLAH"])
+        mass_data_start = mass_header_row + 4 if mass_header_row <= 3 else mass_header_row + 1
+
+        selected_by_variant: Dict[str, Dict[str, Any]] = {}
+        for r in range(mass_data_start, mass_ws.max_row + 1):
+            sku_full = s_clean(mass_ws.cell(row=r, column=mass_cols["sku"]).value)
+            if not sku_full:
+                continue
+            summary["rows_scanned"] += 1
+            if su(sku_full) != "ND-ALL-CAMPAIGN":
+                summary["rows_unmatched"] += 1
+                continue
+
+            variation_id = parse_number_like_id(mass_ws.cell(row=r, column=mass_cols["variation_id"]).value)
+            if not variation_id:
+                summary["rows_unmatched"] += 1
+                issues.append({
+                    "file": mass_file.name,
+                    "row": r,
+                    "sku_full": sku_full,
+                    "reason": "SKU ND-ALL-CAMPAIGN ditemukan, tapi Kode Variasi kosong.",
+                })
+                continue
+
+            selected_by_variant[variation_id] = {
+                "product_id": parse_number_like_id(mass_ws.cell(row=r, column=mass_cols["product_id"]).value),
+                "product_name": s_clean(mass_ws.cell(row=r, column=mass_cols["product_name"]).value),
+                "variation_id": variation_id,
+                "variation_name": s_clean(mass_ws.cell(row=r, column=mass_cols["variation_name"]).value),
+                "sku": sku_full,
+                "price": parse_price_cell(mass_ws.cell(row=r, column=price_col).value) if price_col else None,
+                "stock": to_int_or_none(mass_ws.cell(row=r, column=stock_col).value) if stock_col else None,
+            }
+
+        if not selected_by_variant:
+            issues.append({
+                "file": mass_file.name,
+                "reason": "Tidak ada SKU yang sama persis dengan ND-ALL-CAMPAIGN di file mass update.",
+            })
+
+        campaign_wb = load_workbook(io.BytesIO(campaign_file.getvalue()))
+        campaign_ws = campaign_wb.active
+        campaign_header_row, campaign_cols = find_header_row_with_columns(
+            campaign_ws,
+            {
+                "variation_id": (["KODE VARIASI", "KODE KRITERIA", "VARIATION ID", "VARIATION CODE"], None),
+            },
+            scan_rows=10,
+        )
+        campaign_data_start = campaign_header_row + 3 if campaign_header_row <= 1 else campaign_header_row + 1
+
+        existing_data_rows = []
+        for r in range(campaign_data_start, campaign_ws.max_row + 1):
+            variant = parse_number_like_id(campaign_ws.cell(row=r, column=campaign_cols["variation_id"]).value)
+            if variant:
+                existing_data_rows.append(r)
+
+        if existing_data_rows:
+            for r in range(campaign_ws.max_row, campaign_data_start - 1, -1):
+                variant = parse_number_like_id(campaign_ws.cell(row=r, column=campaign_cols["variation_id"]).value)
+                if variant not in selected_by_variant:
+                    campaign_ws.delete_rows(r, 1)
+                else:
+                    summary["rows_written"] += 1
+            if summary["rows_written"] == 0:
+                issues.append({
+                    "file": campaign_file.name,
+                    "reason": "Kode Variasi campaign tidak ada yang cocok dengan SKU ND-ALL-CAMPAIGN dari mass update.",
+                })
+        else:
+            # Jika file campaign masih berupa template kosong, isi dari data mass update yang SKU-nya ND-ALL-CAMPAIGN.
+            optional_cols = {
+                "product_name": get_optional_col_contains(campaign_ws, campaign_header_row, ["NAMA PRODUK", "PRODUCT NAME"]),
+                "product_id": get_optional_col_contains(campaign_ws, campaign_header_row, ["KODE PRODUK", "PRODUCT ID"]),
+                "variation_name": get_optional_col_contains(campaign_ws, campaign_header_row, ["NAMA VARIASI", "VARIATION NAME"]),
+                "original_price": get_optional_col_contains(campaign_ws, campaign_header_row, ["HARGA AWAL", "ORIGINAL PRICE"]),
+                "current_price": get_optional_col_contains(campaign_ws, campaign_header_row, ["HARGA SAAT INI", "CURRENT PRICE"]),
+                "discount_price": get_optional_col_contains(campaign_ws, campaign_header_row, ["HARGA DISKON", "DISCOUNT PRICE"]),
+            }
+            out_r = campaign_data_start
+            for rec in selected_by_variant.values():
+                if optional_cols["product_name"]:
+                    campaign_ws.cell(row=out_r, column=optional_cols["product_name"]).value = rec["product_name"]
+                if optional_cols["product_id"]:
+                    campaign_ws.cell(row=out_r, column=optional_cols["product_id"]).value = rec["product_id"]
+                if optional_cols["variation_name"]:
+                    campaign_ws.cell(row=out_r, column=optional_cols["variation_name"]).value = rec["variation_name"]
+                campaign_ws.cell(row=out_r, column=campaign_cols["variation_id"]).value = rec["variation_id"]
+                if rec.get("price") is not None:
+                    for key in ("original_price", "current_price", "discount_price"):
+                        if optional_cols[key]:
+                            campaign_ws.cell(row=out_r, column=optional_cols[key]).value = int(rec["price"])
+                out_r += 1
+                summary["rows_written"] += 1
+
+        if summary["rows_written"] == 0 and not issues:
+            issues.append({"file": campaign_file.name, "reason": "Tidak ada baris yang masuk hasil Submit Campaign Shopee."})
+
+        summary["issues_count"] = len(issues)
+        return workbook_to_bytes(campaign_wb), f"hasil_submit_campaign_shopee_{campaign_file.name}", issues_workbook_or_none(issues), summary
+
+    except Exception as e:
+        issues.append({"file": getattr(mass_file, "name", ""), "reason": f"Gagal proses file: {e}"})
+        summary["issues_count"] = len(issues)
+        empty_wb = Workbook()
+        return workbook_to_bytes(empty_wb), "hasil_submit_campaign_shopee.xlsx", issues_workbook_or_none(issues), summary
+
+
 def process_tiktokshop_campaign(mass_files: List[Any]):
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
@@ -6003,10 +6174,48 @@ def render_harga_normal_bigseller():
 def render_submit_campaign_shopee():
     page_header(
         "Submit Campaign Shopee",
-        "Fitur submit campaign untuk Shopee sedang disiapkan.",
-        ["Coming Soon"],
+        "Memfilter file campaign Shopee berdasarkan Kode Variasi dari file mass update yang SKU-nya ND-ALL-CAMPAIGN.",
+        [
+            "File Mass Update Shopee (.xlsx)",
+            "File Campaign Shopee / Eligible Product List (.xlsx)",
+        ],
     )
-    st.info("Coming Soon")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        mass_file = st.file_uploader(
+            "Upload File Mass Update Shopee",
+            type=["xlsx"],
+            key="submit_campaign_shopee_mass",
+        )
+    with col2:
+        campaign_file = st.file_uploader(
+            "Upload File Campaign Shopee",
+            type=["xlsx"],
+            key="submit_campaign_shopee_campaign",
+        )
+
+    if st.button("Proses", key="btn_submit_campaign_shopee"):
+        if not mass_file or not campaign_file:
+            st.error("Upload File Mass Update dan File Campaign dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary = run_with_loading(
+                lambda: process_shopee_campaign(mass_file=mass_file, campaign_file=campaign_file),
+                "Memproses Submit Campaign Shopee...",
+            )
+            cache_downloads(
+                "submit_campaign_shopee",
+                result_name,
+                result_bytes,
+                issues_bytes,
+                summary=summary,
+            )
+        except Exception as e:
+            st.error(f"Gagal memproses: {e}")
+
+    render_cached_summary("submit_campaign_shopee")
+    render_downloads("submit_campaign_shopee")
 
 
 def render_submit_campaign_tiktokshop():
