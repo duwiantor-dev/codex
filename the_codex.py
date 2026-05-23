@@ -6200,13 +6200,30 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
     return workbook_to_bytes(aff_wb), f"hasil_affiliate_tiktokshop_{affiliate_file.name}", issues_workbook_or_none(issues), summary, margin_df
 
 
-def render_affiliate():
+def _uploaded_file_sig(f):
+    if f is None:
+        return None
+    try:
+        return (getattr(f, "name", ""), int(getattr(f, "size", 0) or len(f.getvalue())))
+    except Exception:
+        return (getattr(f, "name", ""), 0)
+
+
+def _clear_affiliate_cache_if_input_changed(signature):
+    sig_key = "affiliate_tiktokshop_input_signature"
+    if st.session_state.get(sig_key) != signature:
+        st.session_state.download_cache.pop("affiliate_tiktokshop", None)
+        st.session_state.summary_cache.pop("affiliate_tiktokshop", None)
+        st.session_state[sig_key] = signature
+
+
+def render_affiliate_tiktokshop():
     page_header(
-        "Affiliate",
+        "Affiliate TikTokShop",
         "Generate file Affiliate TikTokShop berdasarkan range margin dari PL MGR, lalu update File Affiliate: kolom F = YES dan kolom G-I = 100 untuk ID Produk yang cocok.",
         ["File Mass Update TikTokShop (.xlsx)", "PL MGR / Pricelist Margin (.xlsx)", "File Affiliate TikTokShop (.xlsx)"],
     )
-    st.info("Platform: TikTokShop")
+
     c1, c2, c3 = st.columns(3)
     with c1:
         mass_file = st.file_uploader("Upload File Mass Update", type=["xlsx"], key="affiliate_mass")
@@ -6216,32 +6233,25 @@ def render_affiliate():
         affiliate_file = st.file_uploader("Upload File Affiliate", type=["xlsx"], key="affiliate_file")
 
     harga_key = st.radio("Harga acuan margin", ["M3", "M4"], index=0, horizontal=True, key="affiliate_harga_key")
+    selected_pct = st.slider(
+        "Pilih Range Margin (%)",
+        min_value=-100.0,
+        max_value=100.0,
+        value=(-100.0, 100.0),
+        step=0.1,
+        key="affiliate_margin_slider",
+    )
+    margin_range = (selected_pct[0] / 100, selected_pct[1] / 100)
+    st.caption("File hasil baru dibuat setelah klik Proses.")
 
-    margin_range = (-1.0, 1.0)
-    if pl_mgr_file is not None:
-        try:
-            preview_df = build_margin_df_for_affiliate(pl_mgr_file.getvalue(), harga_key)
-            if not preview_df.empty:
-                min_pct = float(preview_df["Margin %"].min() * 100)
-                max_pct = float(preview_df["Margin %"].max() * 100)
-                lo = max(-100.0, min_pct)
-                hi = min(100.0, max_pct)
-                if lo == hi:
-                    hi = lo + 1.0
-                selected_pct = st.slider(
-                    "Pilih Range Margin (%)",
-                    min_value=float(round(lo, 2)),
-                    max_value=float(round(hi, 2)),
-                    value=(float(round(lo, 2)), float(round(hi, 2))),
-                    step=0.1,
-                    key="affiliate_margin_slider",
-                )
-                margin_range = (selected_pct[0] / 100, selected_pct[1] / 100)
-                st.caption(f"SKU terbaca dari PL MGR: {len(preview_df)}")
-            else:
-                st.warning("PL MGR belum menghasilkan data margin.")
-        except Exception as e:
-            st.error(f"Gagal membaca preview margin PL MGR: {e}")
+    current_signature = (
+        _uploaded_file_sig(mass_file),
+        _uploaded_file_sig(pl_mgr_file),
+        _uploaded_file_sig(affiliate_file),
+        harga_key,
+        tuple(selected_pct),
+    )
+    _clear_affiliate_cache_if_input_changed(current_signature)
 
     if st.button("Proses", key="btn_affiliate"):
         if not mass_file or not pl_mgr_file or not affiliate_file:
@@ -6253,11 +6263,18 @@ def render_affiliate():
                 "Memproses Affiliate TikTokShop...",
             )
             cache_downloads("affiliate_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
+            if margin_df is not None and not margin_df.empty:
+                st.caption(f"SKU PL MGR yang masuk range margin: {int(summary.get('sku_selected', 0))}")
         except Exception as e:
             st.error(f"Gagal memproses Affiliate: {e}")
 
     render_cached_summary("affiliate_tiktokshop")
     render_downloads("affiliate_tiktokshop")
+
+
+# Backward compatible route name.
+def render_affiliate():
+    render_affiliate_tiktokshop()
 
 
 def render_analisa_margin():
@@ -6514,7 +6531,15 @@ def build_menu() -> str:
             route = "analisa_produk_stok"
 
     elif group == "Affiliate":
-        route = "affiliate"
+        child = st.sidebar.radio(
+            "Pilih Platform",
+            ["TikTokShop"],
+            key="sidebar_affiliate_menu",
+        )
+        if child == "TikTokShop":
+            route = "affiliate_tiktokshop"
+        else:
+            route = "affiliate_tiktokshop"
 
     else:
         route = "dashboard"
@@ -6576,8 +6601,8 @@ def main():
         render_analisa_produk()
     elif route == "analisa_margin":
         render_analisa_margin()
-    elif route == "affiliate":
-        render_affiliate()
+    elif route in ("affiliate", "affiliate_tiktokshop"):
+        render_affiliate_tiktokshop()
     else:
         st.error("Menu tidak dikenal.")
 
