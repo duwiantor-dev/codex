@@ -40,6 +40,7 @@ st.markdown("""
 SESSION_DEFAULTS = {
     "download_cache": {},
     "summary_cache": {},
+    "issue_preview_cache": {},
     "stock_shopee_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_tiktokshop_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_mwh_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
@@ -505,6 +506,25 @@ def process_marketplace_price_sheet(
     return changed_rows
 
 
+def build_issue_preview_from_bytes(issues_bytes: Optional[bytes], max_items: int = 30) -> List[str]:
+    if not issues_bytes:
+        return []
+    try:
+        wb = load_workbook(io.BytesIO(issues_bytes), data_only=True, read_only=True)
+        ws = wb.active
+        headers = [s_clean(ws.cell(1, c).value).lower() for c in range(1, ws.max_column + 1)]
+        reason_col = headers.index("reason") + 1 if "reason" in headers else ws.max_column
+        counter: Dict[str, int] = {}
+        for r in range(2, ws.max_row + 1):
+            reason = s_clean(ws.cell(r, reason_col).value)
+            if not reason:
+                continue
+            counter[reason] = counter.get(reason, 0) + 1
+        return [f"{count}x {reason}" for reason, count in sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:max_items]]
+    except Exception as e:
+        return [f"Gagal membaca detail issues: {e}"]
+
+
 def cache_downloads(
     cache_key: str,
     result_name: str,
@@ -521,6 +541,16 @@ def cache_downloads(
     }
     if summary is not None:
         st.session_state.summary_cache[cache_key] = summary
+    st.session_state.issue_preview_cache[cache_key] = build_issue_preview_from_bytes(issues_bytes)
+
+
+def render_issue_preview(cache_key: str):
+    items = st.session_state.issue_preview_cache.get(cache_key, [])
+    if not items:
+        return
+    with st.expander("Detail Issue", expanded=True):
+        for item in items:
+            st.write(f"> {item}")
 
 
 def render_downloads(cache_key: str):
@@ -549,6 +579,7 @@ def render_cached_summary(cache_key: str, title: str = "Ringkasan Hasil"):
     summary = st.session_state.summary_cache.get(cache_key)
     if summary:
         render_summary(title, summary)
+        render_issue_preview(cache_key)
 
 
 def get_change_sheet(wb):
@@ -5300,7 +5331,7 @@ def render_analisa_produk_app():
 # ============================================================
 def render_dashboard():
     st.title(APP_TITLE)
-    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, **Submit Campaign**, **Analisa Penjualan**, dan **Analisa Produk** marketplace.")
+    st.markdown("Aplikasi all-in-one untuk **Update Stok**, **Harga Normal**, **Harga Coret**, **Submit Campaign**, **Analisa**, dan **Affiliate** marketplace.")
     c1, c2, c3 = st.columns(3)
     with c1:
         st.subheader("Operasional Marketplace")
@@ -6043,6 +6074,192 @@ def render_analisa_produk():
 
 
 
+def build_margin_df_for_affiliate(pl_bytes: bytes, harga_key: str = "M3") -> pd.DataFrame:
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
+    target_sheets = [name for name in ["LAPTOP", "TELCO", "PC HOM ELE"] if name in wb.sheetnames]
+    rows: List[Dict[str, Any]] = []
+
+    for sheet_name in target_sheets:
+        ws = wb[sheet_name]
+        skip_rows: Set[int] = set()
+        if su(sheet_name) == "LAPTOP":
+            r_start = find_row_contains(ws, "COMING", scan_rows=600)
+            r_end = find_row_contains(ws, "END COMING", scan_rows=1200)
+            if r_start and r_end and r_end >= r_start:
+                skip_rows = set(range(r_start, r_end + 1))
+
+        try:
+            header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, ["M0", harga_key])
+        except Exception:
+            continue
+
+        m0_col = price_cols["M0"]
+        harga_col = price_cols[harga_key]
+        spec_col = get_header_col_fuzzy(ws, header_row, ["SPESIFIKASI", "Specification", "Nama Barang", "Nama Produk"])
+
+        for r in range(header_row + 1, ws.max_row + 1):
+            if r in skip_rows:
+                continue
+            sku = norm_sku(ws.cell(row=r, column=sku_col).value)
+            if not sku or sku in ("TOTAL", "KODEBARANG", "KODE BARANG"):
+                continue
+            m0 = parse_price_cell(ws.cell(row=r, column=m0_col).value)
+            harga_jual = parse_price_cell(ws.cell(row=r, column=harga_col).value)
+            if m0 is None or harga_jual is None or m0 <= 0 or harga_jual <= 0:
+                continue
+            m0 = apply_multiplier_if_needed(m0)
+            harga_jual = apply_multiplier_if_needed(harga_jual)
+            biaya = (harga_jual * 0.047) + 150
+            margin_rp = harga_jual - m0 - biaya
+            margin_pct = margin_rp / harga_jual
+            rows.append({
+                "KODEBARANG": sku,
+                "SPESIFIKASI": s_clean(ws.cell(row=r, column=spec_col).value) if spec_col else "",
+                "M0": int(m0),
+                harga_key: int(harga_jual),
+                "Margin %": float(margin_pct),
+            })
+
+    return pd.DataFrame(rows)
+
+
+def find_product_id_col_any_row(ws: Worksheet, scan_rows: int = 10) -> Tuple[Optional[int], Optional[int]]:
+    return find_col_contains_any_row(
+        ws,
+        ["ID PRODUK", "PRODUCT ID", "PRODUCT_ID", "ID PRODUCT"],
+        scan_rows=scan_rows,
+    )
+
+
+def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_file: Any, harga_key: str, margin_min: float, margin_max: float):
+    issues: List[Dict[str, Any]] = []
+    summary = init_summary(1)
+
+    margin_df = build_margin_df_for_affiliate(pl_mgr_file.getvalue(), harga_key)
+    if margin_df.empty:
+        raise ValueError("PL MGR tidak menghasilkan data margin. Pastikan ada KODEBARANG, M0, dan kolom harga yang dipilih.")
+
+    selected_df = margin_df[(margin_df["Margin %"] >= margin_min) & (margin_df["Margin %"] <= margin_max)].copy()
+    selected_skus = set(selected_df["KODEBARANG"].dropna().astype(str).map(norm_sku))
+    if not selected_skus:
+        issues.append({"file": pl_mgr_file.name, "reason": "Tidak ada KODEBARANG yang masuk range margin terpilih."})
+
+    mass_wb = load_workbook(io.BytesIO(mass_file.getvalue()), data_only=True, read_only=False)
+    mass_ws = mass_wb["Template"] if "Template" in mass_wb.sheetnames else mass_wb.active
+    pid_header_row, product_id_col = find_product_id_col_any_row(mass_ws, scan_rows=10)
+    sku_header_row, seller_sku_col = find_sku_col_any_row(mass_ws, scan_rows=10)
+    if product_id_col is None:
+        raise ValueError("Kolom ID Produk / Product ID tidak ditemukan di File Mass Update.")
+    if seller_sku_col is None:
+        raise ValueError("Kolom SKU Penjual / Seller SKU tidak ditemukan di File Mass Update.")
+
+    data_start = max([x for x in [pid_header_row, sku_header_row] if x is not None]) + 3
+    product_ids: Set[str] = set()
+    for r in range(data_start, mass_ws.max_row + 1):
+        seller_sku_full = s_clean(mass_ws.cell(row=r, column=seller_sku_col).value)
+        if not seller_sku_full:
+            continue
+        summary["rows_scanned"] += 1
+        base_sku, _ = split_sku_addons(seller_sku_full)
+        if norm_sku(base_sku) not in selected_skus:
+            continue
+        product_id = parse_number_like_id(mass_ws.cell(row=r, column=product_id_col).value)
+        if product_id:
+            product_ids.add(product_id)
+
+    if not product_ids:
+        issues.append({"file": mass_file.name, "reason": "Tidak ada ID Produk di Mass Update yang cocok dengan KODEBARANG dari range margin."})
+
+    aff_wb = load_workbook(io.BytesIO(affiliate_file.getvalue()), data_only=False, read_only=False)
+    aff_ws = aff_wb.active
+    aff_pid_header_row, aff_product_id_col = find_product_id_col_any_row(aff_ws, scan_rows=10)
+    if aff_product_id_col is None:
+        raise ValueError("Kolom ID Produk / Product ID tidak ditemukan di File Affiliate.")
+
+    # Sesuai format Affiliate TikTokShop: F = YES, G sampai I = 100.
+    col_yes = 6
+    commission_cols = [7, 8, 9]
+    data_start_aff = (aff_pid_header_row or 1) + 1
+
+    for r in range(data_start_aff, aff_ws.max_row + 1):
+        pid = parse_number_like_id(aff_ws.cell(row=r, column=aff_product_id_col).value)
+        if not pid or pid.upper().startswith("PLEASE"):
+            continue
+        if pid not in product_ids:
+            continue
+        safe_set_cell_value(aff_ws, r, col_yes, "YES")
+        for c in commission_cols:
+            safe_set_cell_value(aff_ws, r, c, 100)
+        summary["rows_written"] += 1
+
+    if summary["rows_written"] == 0:
+        issues.append({"file": affiliate_file.name, "reason": "Tidak ada ID Produk di File Affiliate yang cocok."})
+
+    summary["rows_unmatched"] = max(0, len(product_ids) - summary["rows_written"])
+    summary["issues_count"] = len(issues)
+    return workbook_to_bytes(aff_wb), f"hasil_affiliate_tiktokshop_{affiliate_file.name}", issues_workbook_or_none(issues), summary, margin_df
+
+
+def render_affiliate():
+    page_header(
+        "Affiliate",
+        "Generate file Affiliate TikTokShop berdasarkan range margin dari PL MGR, lalu update File Affiliate: kolom F = YES dan kolom G-I = 100 untuk ID Produk yang cocok.",
+        ["File Mass Update TikTokShop (.xlsx)", "PL MGR / Pricelist Margin (.xlsx)", "File Affiliate TikTokShop (.xlsx)"],
+    )
+    st.info("Platform: TikTokShop")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        mass_file = st.file_uploader("Upload File Mass Update", type=["xlsx"], key="affiliate_mass")
+    with c2:
+        pl_mgr_file = st.file_uploader("Upload PL MGR", type=["xlsx"], key="affiliate_pl_mgr")
+    with c3:
+        affiliate_file = st.file_uploader("Upload File Affiliate", type=["xlsx"], key="affiliate_file")
+
+    harga_key = st.radio("Harga acuan margin", ["M3", "M4"], index=0, horizontal=True, key="affiliate_harga_key")
+
+    margin_range = (-1.0, 1.0)
+    if pl_mgr_file is not None:
+        try:
+            preview_df = build_margin_df_for_affiliate(pl_mgr_file.getvalue(), harga_key)
+            if not preview_df.empty:
+                min_pct = float(preview_df["Margin %"].min() * 100)
+                max_pct = float(preview_df["Margin %"].max() * 100)
+                lo = max(-100.0, min_pct)
+                hi = min(100.0, max_pct)
+                if lo == hi:
+                    hi = lo + 1.0
+                selected_pct = st.slider(
+                    "Pilih Range Margin (%)",
+                    min_value=float(round(lo, 2)),
+                    max_value=float(round(hi, 2)),
+                    value=(float(round(lo, 2)), float(round(hi, 2))),
+                    step=0.1,
+                    key="affiliate_margin_slider",
+                )
+                margin_range = (selected_pct[0] / 100, selected_pct[1] / 100)
+                st.caption(f"SKU terbaca dari PL MGR: {len(preview_df)}")
+            else:
+                st.warning("PL MGR belum menghasilkan data margin.")
+        except Exception as e:
+            st.error(f"Gagal membaca preview margin PL MGR: {e}")
+
+    if st.button("Proses", key="btn_affiliate"):
+        if not mass_file or not pl_mgr_file or not affiliate_file:
+            st.error("Upload File Mass Update, PL MGR, dan File Affiliate dulu.")
+            return
+        try:
+            result_bytes, result_name, issues_bytes, summary, margin_df = run_with_loading(
+                lambda: process_affiliate_tiktokshop(mass_file, pl_mgr_file, affiliate_file, harga_key, margin_range[0], margin_range[1]),
+                "Memproses Affiliate TikTokShop...",
+            )
+            cache_downloads("affiliate_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
+        except Exception as e:
+            st.error(f"Gagal memproses Affiliate: {e}")
+
+    render_cached_summary("affiliate_tiktokshop")
+    render_downloads("affiliate_tiktokshop")
+
+
 def render_analisa_margin():
     st.title("Analisa Margin")
     st.caption("Upload Pricelist untuk menghitung % margin per SKU dari sheet LAPTOP, TELCO, dan PC HOM ELE.")
@@ -6214,7 +6431,7 @@ def build_menu() -> str:
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa"],
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
         key="sidebar_main_menu",
     )
 
@@ -6288,15 +6505,16 @@ def build_menu() -> str:
     elif group == "Analisa":
         child = st.sidebar.radio(
             "Pilih Fitur Analisa",
-            ["Analisa Penjualan", "Analisa Produk", "Analisa Margin"],
+            ["Analisa Penjualan", "Analisa Produk"],
             key="sidebar_analisa_menu",
         )
         if child == "Analisa Penjualan":
             route = "analisa_penjualan"
-        elif child == "Analisa Produk":
-            route = "analisa_produk_stok"
         else:
-            route = "analisa_margin"
+            route = "analisa_produk_stok"
+
+    elif group == "Affiliate":
+        route = "affiliate"
 
     else:
         route = "dashboard"
@@ -6358,6 +6576,8 @@ def main():
         render_analisa_produk()
     elif route == "analisa_margin":
         render_analisa_margin()
+    elif route == "affiliate":
+        render_affiliate()
     else:
         st.error("Menu tidak dikenal.")
 
