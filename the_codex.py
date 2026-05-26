@@ -1670,16 +1670,21 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
 # ============================================================
 # PRICE LOADERS
 # ============================================================
-def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
-    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True)
+def load_addon_map_generic(addon_bytes: bytes, progress_callback=None, progress_start: int = 8, progress_end: int = 12) -> Dict[str, int]:
+    if progress_callback:
+        progress_callback(progress_start, "Membuka workbook Addon Mapping...")
+    wb = load_workbook(io.BytesIO(addon_bytes), data_only=True, read_only=True)
     ws = wb.active
+    reset_readonly_dimensions_if_needed(ws)
     code_candidates = ["addon_code", "ADDON_CODE", "Addon Code", "Kode", "KODE", "KODE ADDON", "KODE_ADDON", "Standarisasi Kode SKU di Varian"]
     price_candidates = ["harga", "HARGA", "Price", "PRICE", "Harga"]
 
+    if progress_callback:
+        progress_callback(progress_start + 1, "Mencari header Addon Mapping...")
     header_row = None
     code_col = None
     price_col = None
-    for r in range(1, 30):
+    for r in range(1, min(30, ws.max_row or 30)):
         code_col = get_header_col_fuzzy(ws, r, code_candidates)
         price_col = get_header_col_fuzzy(ws, r, price_candidates)
         if code_col and price_col:
@@ -1688,15 +1693,26 @@ def load_addon_map_generic(addon_bytes: bytes) -> Dict[str, int]:
     if header_row is None or code_col is None or price_col is None:
         raise ValueError("Header Addon Mapping tidak ketemu. Pastikan ada kolom addon_code & harga (atau setara).")
 
+    if progress_callback:
+        progress_callback(progress_start + 2, f"Header Addon ketemu di row {header_row}. Membaca kode addon...")
     addon_map: Dict[str, int] = {}
-    for r in range(header_row + 1, ws.max_row + 1):
-        code = normalize_addon_code(ws.cell(row=r, column=code_col).value)
+    total_rows = max(1, (ws.max_row or header_row) - header_row)
+    for idx, row_vals in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0):
+            progress_tick(progress_callback, progress_start + 2, progress_end, idx, total_rows, f"Scan Addon Mapping: {idx}/{total_rows} baris, {len(addon_map)} kode terbaca...")
+        code = normalize_addon_code(row_vals[code_col - 1] if len(row_vals) >= code_col else None)
         if not code:
             continue
-        price_raw = parse_price_cell(ws.cell(row=r, column=price_col).value)
+        price_raw = parse_price_cell(row_vals[price_col - 1] if len(row_vals) >= price_col else None)
         if price_raw is None:
             continue
         addon_map[code] = int(apply_multiplier_if_needed(price_raw))
+    try:
+        wb.close()
+    except Exception:
+        pass
+    if progress_callback:
+        progress_callback(progress_end, f"Addon Mapping selesai: {len(addon_map)} kode terbaca.")
     return addon_map
 
 
@@ -1725,20 +1741,36 @@ def find_header_row_and_cols_pricelist_fixed(ws: Worksheet, required_price_cols:
     )
 
 
-def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str]) -> Dict[str, Dict[str, int]]:
-    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
+def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str], progress_callback=None, progress_start: int = 3, progress_end: int = 8) -> Dict[str, Dict[str, int]]:
+    if progress_callback:
+        progress_callback(progress_start, "Membuka workbook Pricelist harga...")
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=True)
     ws = get_change_sheet(wb)
+    reset_readonly_dimensions_if_needed(ws)
+    if progress_callback:
+        progress_callback(progress_start + 1, "Mencari header sheet CHANGE...")
     header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
     result: Dict[str, Dict[str, int]] = {}
-    for r in range(header_row + 1, ws.max_row + 1):
-        sku = norm_sku(ws.cell(row=r, column=sku_col).value)
+    total_rows = max(1, (ws.max_row or header_row) - header_row)
+    if progress_callback:
+        progress_callback(progress_start + 2, f"Header harga ketemu di row {header_row}. Scan {total_rows} baris...")
+    for idx, row_vals in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=1):
+        if progress_callback and (idx == 1 or idx % 1000 == 0):
+            progress_tick(progress_callback, progress_start + 2, progress_end, idx, total_rows, f"Scan Pricelist harga CHANGE: {idx}/{total_rows} baris, {len(result)} SKU terbaca...")
+        sku = norm_sku(row_vals[sku_col - 1] if len(row_vals) >= sku_col else None)
         if not sku:
             continue
         result[sku] = {}
         for label, col in price_cols.items():
-            raw = parse_price_cell(ws.cell(row=r, column=col).value)
+            raw = parse_price_cell(row_vals[col - 1] if len(row_vals) >= col else None)
             if raw is not None:
                 result[sku][label] = int(apply_multiplier_if_needed(raw))
+    try:
+        wb.close()
+    except Exception:
+        pass
+    if progress_callback:
+        progress_callback(progress_end, f"Pricelist harga selesai: {len(result)} SKU terbaca.")
     return result
 
 
@@ -1747,36 +1779,59 @@ def load_pricelist_price_map_multisheet(
     needed_cols: List[str],
     start_sheet: str = "LAPTOP",
     end_sheet: str = "ACC",
+    progress_callback=None,
+    progress_start: int = 3,
+    progress_end: int = 8,
 ) -> Dict[str, Dict[str, int]]:
-    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True)
+    if progress_callback:
+        progress_callback(progress_start, "Membuka workbook Pricelist harga multi-sheet...")
+    wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
 
+    if progress_callback:
+        progress_callback(progress_start + 1, f"Workbook harga terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
     for sname in wb.sheetnames:
         if su(sname) == "LAPTOP":
+            if progress_callback:
+                progress_callback(progress_start + 1, "Membersihkan blok COMING di sheet LAPTOP...")
             delete_coming_block_in_laptop(wb[sname])
             break
 
     target_sheets = sheet_range_between(wb.sheetnames, start_sheet, end_sheet)
     result: Dict[str, Dict[str, int]] = {}
     parsed_sheets = 0
+    total_sheets = max(1, len(target_sheets))
+    if progress_callback:
+        progress_callback(progress_start + 2, f"Mulai scan harga {total_sheets} sheet: {start_sheet} s/d {end_sheet}...")
 
-    for sname in target_sheets:
+    for idx_sheet, sname in enumerate(target_sheets, start=1):
+        sheet_start = progress_start + 2 + int((idx_sheet - 1) / total_sheets * max(1, progress_end - progress_start - 2))
+        sheet_end = progress_start + 2 + int(idx_sheet / total_sheets * max(1, progress_end - progress_start - 2))
         ws = wb[sname]
+        if progress_callback:
+            progress_callback(sheet_start, f"Membaca sheet harga {idx_sheet}/{total_sheets}: {sname}...")
         try:
             header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
         except Exception:
+            if progress_callback:
+                progress_callback(sheet_start, f"Skip sheet {sname}: header harga tidak cocok.")
             continue
 
         parsed_sheets += 1
-        for r in range(header_row + 1, ws.max_row + 1):
-            sku = norm_sku(ws.cell(row=r, column=sku_col).value)
+        total_rows = max(1, ws.max_row - header_row)
+        for idx_row, row_vals in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=1):
+            if progress_callback and (idx_row == 1 or idx_row % 1000 == 0):
+                progress_tick(progress_callback, sheet_start, max(sheet_start + 1, sheet_end), idx_row, total_rows, f"Scan harga [{sname}]: {idx_row}/{total_rows} baris, total {len(result)} SKU...")
+            sku = norm_sku(row_vals[sku_col - 1] if len(row_vals) >= sku_col else None)
             if not sku:
                 continue
             if sku not in result:
                 result[sku] = {}
             for label, col in price_cols.items():
-                raw = parse_price_cell(ws.cell(row=r, column=col).value)
+                raw = parse_price_cell(row_vals[col - 1] if len(row_vals) >= col else None)
                 if raw is not None:
                     result[sku][label] = int(apply_multiplier_if_needed(raw))
+        if progress_callback:
+            progress_callback(sheet_end, f"Sheet harga {sname} selesai. Total SKU harga: {len(result)}")
 
     if parsed_sheets == 0:
         raise ValueError(
@@ -1786,6 +1841,8 @@ def load_pricelist_price_map_multisheet(
         raise ValueError(
             f"Pricelist multi-sheet '{start_sheet}' s/d '{end_sheet}' terbaca, tapi data harga kosong."
         )
+    if progress_callback:
+        progress_callback(progress_end, f"Pricelist harga selesai: {len(result)} SKU dari {parsed_sheets} sheet.")
     return result
 
 
@@ -1841,10 +1898,10 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga multi-sheet...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
     if progress_callback:
         progress_callback(8, "Membaca Addon Mapping...")
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -1961,8 +2018,8 @@ def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file:
 def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga TikTokShop...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -2019,8 +2076,8 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
 def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga Mwh...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
@@ -2071,8 +2128,8 @@ def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: An
 def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str, progress_callback=None):
     if progress_callback:
         progress_callback(3, f"Membaca Pricelist {page_title}...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -2138,8 +2195,8 @@ def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon
 
 
 def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, progress_callback=None):
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files))
     output_parts: List[Tuple[str, bytes]] = []
@@ -2262,8 +2319,8 @@ def find_blibli_price_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
 def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga Blibli...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -2318,8 +2375,8 @@ def find_akulaku_price_columns(ws: Worksheet) -> Tuple[int, int, int]:
 def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga Akulaku...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -2381,8 +2438,8 @@ def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_fi
 def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist harga coret TikTokShop...")
-    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3"])
-    addon_map = load_addon_map_generic(addon_file.getvalue())
+    price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3"], progress_callback=progress_callback, progress_start=3, progress_end=8)
+    addon_map = load_addon_map_generic(addon_file.getvalue(), progress_callback=progress_callback, progress_start=8, progress_end=12)
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
     ws_in = wb_in.active
 
@@ -6898,7 +6955,7 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
     summary = init_summary(1)
 
     if progress_callback:
-        progress_callback(5, "Membaca PL MGR dan menghitung margin...")
+        progress_callback(5, "Membuka PL MGR Affiliate dan menghitung margin SKU...")
     margin_df = build_margin_df_for_affiliate(pl_mgr_file.getvalue(), harga_key)
     if margin_df.empty:
         raise ValueError("PL MGR tidak menghasilkan data margin. Pastikan ada KODEBARANG, M0, dan kolom harga yang dipilih.")
@@ -6909,7 +6966,7 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
         issues.append({"file": pl_mgr_file.name, "reason": "Tidak ada KODEBARANG yang masuk range margin terpilih."})
 
     if progress_callback:
-        progress_callback(25, "Membaca file mass update Affiliate...")
+        progress_callback(25, f"Margin selesai: {len(selected_skus)} SKU masuk range. Membaca file mass update Affiliate...")
     mass_wb = load_workbook(io.BytesIO(mass_file.getvalue()), data_only=True, read_only=False)
     mass_ws = mass_wb["Template"] if "Template" in mass_wb.sheetnames else mass_wb.active
     pid_header_row, product_id_col = find_product_id_col_any_row(mass_ws, scan_rows=10)
@@ -6940,7 +6997,7 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
         issues.append({"file": mass_file.name, "reason": "Tidak ada ID Produk di Mass Update yang cocok dengan KODEBARANG dari range margin."})
 
     if progress_callback:
-        progress_callback(65, "Membaca file Affiliate dan update komisi...")
+        progress_callback(65, f"Mass update selesai: {len(product_ids)} Product ID cocok. Membaca file Affiliate dan update komisi...")
     aff_wb = load_workbook(io.BytesIO(affiliate_file.getvalue()), data_only=False, read_only=False)
     aff_ws = aff_wb.active
     aff_pid_header_row, aff_product_id_col = find_product_id_col_any_row(aff_ws, scan_rows=10)
@@ -6951,8 +7008,11 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
     col_yes = 6
     commission_cols = [7, 8, 9]
     data_start_aff = (aff_pid_header_row or 1) + 1
+    total_aff_rows = max(1, aff_ws.max_row - data_start_aff + 1)
 
     for r in range(data_start_aff, aff_ws.max_row + 1):
+        if progress_callback and (r - data_start_aff) % 2000 == 0:
+            progress_tick(progress_callback, 70, 90, r - data_start_aff, total_aff_rows, f"Update file Affiliate: {r - data_start_aff}/{total_aff_rows} baris, {summary['rows_written']} baris ditandai...")
         pid = parse_number_like_id(aff_ws.cell(row=r, column=aff_product_id_col).value)
         if not pid or pid.upper().startswith("PLEASE"):
             continue
