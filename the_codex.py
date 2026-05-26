@@ -1216,8 +1216,37 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
 
 
 def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    # Optimized BigSeller stock:
+    # - read_only=True + iter_rows(values_only=True) untuk file besar
+    # - progress dibagi fase: pricelist, proses file, buat output, zip
+    # - mode "Info saja" tidak menyimpan puluhan ribu detail issue ke memory/workbook
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+
+    issue_excel_mode = st.session_state.get("issue_output_mode", "Info saja") == "Excel"
     issues: List[Dict[str, Any]] = []
+    issue_counter: Dict[str, int] = {}
+
+    def add_issue(reason: str, *, file_name: str = "", row: Any = "", sku_full: str = "", old_value: Any = "", new_value: Any = ""):
+        normalized = normalize_issue_reason(reason)
+        issue_counter[normalized] = issue_counter.get(normalized, 0) + 1
+        if issue_excel_mode:
+            issues.append({
+                "file": file_name,
+                "row": row,
+                "sku_full": sku_full,
+                "old_value": old_value,
+                "new_value": new_value,
+                "reason": reason,
+            })
+
+    def issue_info_from_counter() -> List[str]:
+        return [
+            f"{count}x {reason}"
+            for reason, count in sorted(issue_counter.items(), key=lambda x: (-x[1], x[0]))[:50]
+        ]
+
     summary = init_summary(len(mass_files))
     output_parts: List[Tuple[str, bytes]] = []
     current_rows: List[List[Any]] = []
@@ -1229,6 +1258,8 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
         nonlocal current_rows, current_part, output_parts, output_header, header_len
         if not current_rows:
             return
+        if progress_callback:
+            progress_callback(88, f"Membuat output BigSeller part {current_part} ({len(current_rows)} baris)...")
         wb = Workbook()
         ws = wb.active
         ws.title = "Sheet1"
@@ -1246,7 +1277,7 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
         wb = None
         try:
             if progress_callback:
-                progress_callback(10 + int((file_idx - 1) / total_files * 80), f"Membaca BigSeller {file_idx}/{total_files}...")
+                progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Membaca BigSeller {file_idx}/{total_files}: {mf.name}")
             wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=True, data_only=False)
             ws = wb.worksheets[0]
             reset_readonly_dimensions_if_needed(ws)
@@ -1259,6 +1290,7 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                 if len(output_header) < header_len:
                     output_header.extend([None] * (header_len - len(output_header)))
 
+            file_rows_scanned = 0
             for r, row_vals_raw in enumerate(ws.iter_rows(min_row=data_start, values_only=True), start=data_start):
                 row_vals = list(row_vals_raw[:header_len])
                 if len(row_vals) < header_len:
@@ -1268,19 +1300,20 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                     continue
 
                 summary["rows_scanned"] += 1
+                file_rows_scanned += 1
                 old_qty = to_int_or_none(row_vals[qty_col - 1] if len(row_vals) >= qty_col else None)
                 new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
 
                 if new_qty is None:
                     summary["rows_unmatched"] += 1
-                    issues.append({
-                        "file": mf.name,
-                        "row": r,
-                        "sku_full": sku_full,
-                        "old_value": old_qty,
-                        "new_value": "",
-                        "reason": "SKU tidak ditemukan di Pricelist stok",
-                    })
+                    add_issue(
+                        "SKU tidak ditemukan di Pricelist stok",
+                        file_name=mf.name,
+                        row=r,
+                        sku_full=sku_full,
+                        old_value=old_qty,
+                        new_value="",
+                    )
                     continue
 
                 if old_qty is not None and int(old_qty) == int(new_qty):
@@ -1293,11 +1326,14 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                 if len(current_rows) >= BIGSELLER_MAX_ROWS_PER_FILE:
                     flush_part()
 
-                if progress_callback and summary["rows_scanned"] % 2000 == 0:
-                    progress_callback(10 + int((file_idx - 0.5) / total_files * 80), f"Memproses BigSeller {file_idx}/{total_files}: {summary['rows_scanned']} baris...")
+                if progress_callback and file_rows_scanned % 3000 == 0:
+                    progress_callback(
+                        10 + int((file_idx - 0.25) / total_files * 75),
+                        f"Proses file {file_idx}/{total_files}: {file_rows_scanned} baris file ini, total {summary['rows_scanned']} baris...",
+                    )
 
         except Exception as e:
-            issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
+            add_issue(f"Gagal proses file: {e}", file_name=mf.name)
         finally:
             try:
                 if wb is not None:
@@ -1305,8 +1341,11 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
             except Exception:
                 pass
 
+    if progress_callback:
+        progress_callback(90, "Menyimpan output terakhir...")
     flush_part()
-    summary["issues_count"] = len(issues)
+
+    summary["issues_count"] = sum(issue_counter.values())
     if not output_parts:
         empty_wb = Workbook()
         empty_ws = empty_wb.active
@@ -1315,9 +1354,22 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
             for c, val in enumerate(output_header, start=1):
                 empty_ws.cell(row=1, column=c).value = val
         output_parts.append(("hasil_update_stok_bigseller_part_1.xlsx", workbook_to_bytes(empty_wb)))
+
+    if issue_excel_mode:
+        issues_bytes = make_issues_workbook(issues) if issues else None
+        st.session_state["_last_issue_info"] = summarize_issues_text(issues)
+    else:
+        issues_bytes = None
+        st.session_state["_last_issue_info"] = issue_info_from_counter()
+
     if len(output_parts) == 1:
-        return output_parts[0][1], output_parts[0][0], make_issues_workbook(issues) if issues else None, summary
-    return zip_named_files(output_parts), "hasil_update_stok_bigseller.zip", make_issues_workbook(issues) if issues else None, summary
+        if progress_callback:
+            progress_callback(97, "Menyiapkan file download...")
+        return output_parts[0][1], output_parts[0][0], issues_bytes, summary
+
+    if progress_callback:
+        progress_callback(95, f"Membuat ZIP dari {len(output_parts)} part...")
+    return zip_named_files(output_parts), "hasil_update_stok_bigseller.zip", issues_bytes, summary
 
 
 
@@ -2480,20 +2532,18 @@ def run_with_loading(process_fn, loading_text: str = "Memproses..."):
 
 
 def run_with_loading_callback(process_fn, loading_text: str = "Memproses..."):
-    # Khusus fitur yang memang support progress_callback, saat ini BigSeller.
+    # Khusus fitur yang support progress_callback. Progress tidak langsung dihapus
+    # supaya user tidak melihat progress hilang lalu muncul loading ulang saat Streamlit render hasil/download.
     progress = st.progress(0, text=loading_text)
 
     def update_progress(value: int, text: Optional[str] = None):
         value = max(0, min(100, int(value)))
         progress.progress(value, text=text or loading_text)
 
-    try:
-        update_progress(5, loading_text)
-        result = process_fn(update_progress)
-        update_progress(100, "Selesai")
-        return result
-    finally:
-        progress.empty()
+    update_progress(5, loading_text)
+    result = process_fn(update_progress)
+    update_progress(100, "Selesai. Menyiapkan tombol download...")
+    return result
 
 
 
