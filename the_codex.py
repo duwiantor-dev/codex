@@ -894,7 +894,10 @@ def build_area_warehouse_meta(
     return col_area_wh
 
 
-def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
+def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str, progress_callback=None, progress_start: int = 4, progress_end: int = 12):
+    if progress_callback:
+        progress_callback(progress_start, f"[{sheet_name}] mencari header KODEBARANG...")
+
     header_row = find_header_row_by_exact(ws, "KODEBARANG", scan_rows=200)
     if header_row is None:
         header_row = find_header_row_by_exact(ws, "KODE BARANG", scan_rows=200)
@@ -910,6 +913,9 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
     if sku_col is None:
         raise ValueError(f"[{sheet_name}] Kolom 'KODEBARANG' / 'KODE BARANG' tidak ditemukan.")
 
+    if progress_callback:
+        progress_callback(progress_start + 1, f"[{sheet_name}] membaca struktur area/gudang...")
+
     header_row_used, tot_col = find_tot_col(ws, header_row)
     merged_map = build_merged_lookup_map(ws)
     area_row = header_row_used + 1
@@ -922,6 +928,12 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
         start_col=tot_col + 1,
     )
 
+    if progress_callback:
+        progress_callback(
+            progress_start + 2,
+            f"[{sheet_name}] area/gudang terbaca: {len(col_area_wh)} kolom stok. Mulai scan SKU...",
+        )
+
     sku_map: Dict[str, Dict[str, Any]] = {}
     area_names: Set[str] = set()
     area_warehouses: Set[str] = set()
@@ -929,7 +941,19 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
         area_names.add(meta["area"])
         area_warehouses.add(meta["area_wh"])
 
-    for r in range(max(header_row, warehouse_row) + 1, ws.max_row + 1):
+    data_start = max(header_row, warehouse_row) + 1
+    total_rows = max(1, ws.max_row - data_start + 1)
+    for idx, r in enumerate(range(data_start, ws.max_row + 1), start=1):
+        if progress_callback and (idx == 1 or idx % 500 == 0):
+            progress_tick(
+                progress_callback,
+                progress_start + 2,
+                progress_end,
+                idx,
+                total_rows,
+                f"[{sheet_name}] scan Pricelist stok: {idx}/{total_rows} baris, SKU terbaca {len(sku_map)}...",
+            )
+
         sku = s_clean(ws.cell(r, sku_col).value)
         if not sku:
             continue
@@ -949,13 +973,26 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str):
             by_area_wh[area_wh_name] = by_area_wh.get(area_wh_name, 0) + int(v)
             by_area[area_name] = by_area.get(area_name, 0) + int(v)
         sku_map[sku_key] = {"TOT": tot_val, "by_area_wh": by_area_wh, "by_area": by_area}
+
+    if progress_callback:
+        progress_callback(progress_end, f"[{sheet_name}] selesai: {len(sku_map)} SKU stok terbaca.")
+
     return sku_map, {"area_options": sorted(area_names), "gudang_options": sorted(area_warehouses), "default_gudang_options": sorted(area_warehouses)}
 
 
-def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
+def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes, progress_callback=None, progress_start: int = 3, progress_end: int = 12):
+    if progress_callback:
+        progress_callback(progress_start, "Membuka workbook Pricelist stok...")
+
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
+
+    if progress_callback:
+        progress_callback(progress_start + 1, f"Workbook terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
+
     for sname in wb.sheetnames:
         if su(sname) == "LAPTOP":
+            if progress_callback:
+                progress_callback(progress_start + 1, "Membersihkan blok COMING di sheet LAPTOP...")
             delete_coming_block_in_laptop(wb[sname])
             break
 
@@ -966,24 +1003,59 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes):
             f"Sheet stok tidak ditemukan. Pricelist harus punya minimal salah satu sheet: {', '.join(STOCK_PRICELIST_SHEETS)}"
         )
 
+    if progress_callback:
+        progress_callback(
+            progress_start + 2,
+            f"Sheet stok yang diproses: {', '.join(target_sheets)}",
+        )
+
     merged_lookup: Dict[str, Dict[str, Any]] = {}
     area_options_all: Set[str] = set()
     gudang_options_all: Set[str] = set()
     default_gudang_options_all: Set[str] = set()
-    for sname in target_sheets:
-        sku_map, meta = build_stock_lookup_from_sheet_fast(wb[sname], sname)
+
+    total_sheets = max(1, len(target_sheets))
+    span = max(1, progress_end - (progress_start + 2))
+    for idx, sname in enumerate(target_sheets, start=1):
+        sheet_start = progress_start + 2 + int((idx - 1) / total_sheets * span)
+        sheet_end = progress_start + 2 + int(idx / total_sheets * span)
+        sheet_end = max(sheet_start + 1, sheet_end)
+
+        if progress_callback:
+            progress_callback(sheet_start, f"Membaca sheet stok {idx}/{total_sheets}: {sname}...")
+
+        sku_map, meta = build_stock_lookup_from_sheet_fast(
+            wb[sname],
+            sname,
+            progress_callback=progress_callback,
+            progress_start=sheet_start,
+            progress_end=min(progress_end, sheet_end),
+        )
         merged_lookup.update(sku_map)
         area_options_all |= set(meta.get("area_options", []))
         gudang_options_all |= set(meta.get("gudang_options", []))
         default_gudang_options_all |= set(meta.get("default_gudang_options", []))
+
+        if progress_callback:
+            progress_callback(
+                min(progress_end, sheet_end),
+                f"Sheet {idx}/{total_sheets} selesai: {sname}, total SKU terkumpul {len(merged_lookup)}...",
+            )
+
     if not merged_lookup:
         raise ValueError("Pricelist terbaca, tapi lookup stok kosong.")
+
+    if progress_callback:
+        progress_callback(
+            progress_end,
+            f"Pricelist stok selesai: {len(merged_lookup)} SKU, {len(area_options_all)} area, {len(gudang_options_all)} gudang.",
+        )
+
     return merged_lookup, {
         "area_options": sorted(area_options_all),
         "gudang_options": sorted(gudang_options_all),
         "default_gudang_options": sorted(default_gudang_options_all),
     }
-
 
 def apply_stock_floor_rule(qty: Optional[int], zero_below: int = 0) -> Optional[int]:
     if qty is None:
@@ -1131,7 +1203,7 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
 def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
@@ -1219,7 +1291,7 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
 def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
@@ -1255,7 +1327,7 @@ def find_mwh_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
 def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
@@ -1325,7 +1397,7 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
     # - mode "Info saja" tidak menyimpan puluhan ribu detail issue ke memory/workbook
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
 
     issue_excel_mode = st.session_state.get("issue_output_mode", "Info saja") == "Excel"
     issues: List[Dict[str, Any]] = []
@@ -1495,7 +1567,7 @@ def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
 def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -1552,7 +1624,7 @@ def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
 def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     if progress_callback:
         progress_callback(3, "Membaca Pricelist stok dan area/gudang...")
-    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+    stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue(), progress_callback=progress_callback)
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
@@ -2671,10 +2743,19 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
             progress = st.progress(0, text="Menyiapkan Pricelist stok...")
             status = st.empty()
             try:
-                progress.progress(10, text="Membaca file Pricelist...")
-                status.caption("Membaca sheet stok: LAPTOP, TELCO, PC HOM ELE, SOF COM SUP, ACC...")
-                _, meta = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
-                progress.progress(85, text="Menyusun daftar area dan gudang...")
+                def area_progress_callback(pct, msg):
+                    pct = max(0, min(100, int(pct)))
+                    progress.progress(pct, text=msg)
+                    status.caption(msg)
+
+                area_progress_callback(3, "Membuka Pricelist stok...")
+                _, meta = build_stock_lookup_from_pricelist_bytes(
+                    pricelist_file.getvalue(),
+                    progress_callback=area_progress_callback,
+                    progress_start=3,
+                    progress_end=85,
+                )
+                progress.progress(90, text="Menyusun daftar area dan gudang...")
                 st.session_state[loaded_areas_key] = meta
                 default_gudangs = get_default_tongle_gudangs(meta.get("gudang_options", []))
                 if default_gudangs:
