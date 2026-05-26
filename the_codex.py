@@ -2548,30 +2548,48 @@ def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
 
 
 def run_with_loading(process_fn, loading_text: str = "Memproses..."):
-    # Aman untuk semua fitur lama: tidak mengubah cara pemanggilan process_fn.
+    # Progress global untuk SEMUA fitur lama.
+    # Catatan: fitur lama belum punya progress per-baris, jadi progress dibuat per tahap umum.
+    # Progress sengaja tidak di-empty langsung agar tidak terlihat hilang lalu muncul loading ulang
+    # saat Streamlit sedang render summary/download button.
     progress = st.progress(0, text=loading_text)
+    status = st.empty()
     try:
-        progress.progress(20, text=loading_text)
+        progress.progress(5, text=loading_text)
+        status.caption("Menyiapkan data...")
+        progress.progress(20, text="Membaca file dan memproses data...")
         result = process_fn()
-        progress.progress(100, text="Selesai")
+        progress.progress(95, text="Menyusun output dan tombol download...")
+        status.caption("Menyusun hasil...")
+        progress.progress(100, text="Selesai. Hasil siap didownload.")
+        status.caption("Selesai.")
         return result
-    finally:
-        progress.empty()
+    except Exception:
+        progress.progress(100, text="Proses gagal. Cek pesan error di bawah.")
+        status.caption("Gagal memproses.")
+        raise
 
 
 def run_with_loading_callback(process_fn, loading_text: str = "Memproses..."):
-    # Khusus fitur yang support progress_callback. Progress tidak langsung dihapus
-    # supaya user tidak melihat progress hilang lalu muncul loading ulang saat Streamlit render hasil/download.
+    # Progress detail untuk fitur yang support progress_callback.
+    # Dipakai di BigSeller dan fitur lain yang nanti di-upgrade per processor.
     progress = st.progress(0, text=loading_text)
+    status = st.empty()
 
     def update_progress(value: int, text: Optional[str] = None):
         value = max(0, min(100, int(value)))
-        progress.progress(value, text=text or loading_text)
+        msg = text or loading_text
+        progress.progress(value, text=msg)
+        status.caption(msg)
 
-    update_progress(5, loading_text)
-    result = process_fn(update_progress)
-    update_progress(100, "Selesai. Menyiapkan tombol download...")
-    return result
+    try:
+        update_progress(5, loading_text)
+        result = process_fn(update_progress)
+        update_progress(100, "Selesai. Hasil siap didownload.")
+        return result
+    except Exception:
+        update_progress(100, "Proses gagal. Cek pesan error di bawah.")
+        raise
 
 
 
