@@ -592,9 +592,11 @@ def cache_downloads(
     else:
         st.session_state.issue_preview_cache[cache_key] = list(st.session_state.get("_last_issue_info", []))
 
-    # Simpan pointer hasil terakhir supaya download/summary tidak hilang saat user pindah menu.
+    # Simpan pointer hasil terakhir per halaman/fitur.
+    # Jadi hasil tidak hilang saat rerun di fitur yang sama, tapi tidak ikut muncul di fitur lain.
     st.session_state.last_result_cache_key = cache_key
     st.session_state.last_result_title = result_name or "Hasil terakhir"
+    st.session_state.last_result_route = st.session_state.get("current_route")
 
 
 def render_issue_preview(cache_key: str):
@@ -649,6 +651,13 @@ def render_last_result_panel():
     if cache_key in st.session_state.get("_rendered_cache_keys", set()):
         return
     if cache_key not in st.session_state.download_cache and cache_key not in st.session_state.summary_cache:
+        return
+
+    # Jangan tampilkan hasil dari fitur lain.
+    # Contoh: hasil Update Stok TikTokShop tidak muncul saat user pindah ke MWH/BigSeller.
+    current_route = st.session_state.get("current_route")
+    last_route = st.session_state.get("last_result_route")
+    if last_route and current_route and last_route != current_route:
         return
 
     st.markdown("---")
@@ -7055,6 +7064,7 @@ def build_menu() -> str:
 def main():
     st.session_state["_rendered_cache_keys"] = set()
     route = build_menu()
+    st.session_state.current_route = route
     if route == "dashboard":
         render_dashboard()
     elif route == "update_stok_shopee":
