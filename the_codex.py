@@ -483,6 +483,19 @@ def _safe_progress_range(progress_start=None, progress_end=None, default_start: 
     return start, end
 
 
+def _progress_pct(base=None, offset: int = 0, default: int = 0) -> int:
+    """Aman untuk progress_start/progress_end None agar tidak error None + int."""
+    try:
+        base_i = int(base) if base is not None else int(default)
+    except Exception:
+        base_i = int(default)
+    try:
+        offset_i = int(offset or 0)
+    except Exception:
+        offset_i = 0
+    return max(0, min(100, base_i + offset_i))
+
+
 def progress_tick(progress_callback, start_pct: int, end_pct: int, current: int, total: int, message: str):
     """Update progress aman untuk processor besar."""
     if not progress_callback:
@@ -933,7 +946,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str, progress_
         raise ValueError(f"[{sheet_name}] Kolom 'KODEBARANG' / 'KODE BARANG' tidak ditemukan.")
 
     if progress_callback:
-        progress_callback(progress_start + 1, f"[{sheet_name}] membaca struktur area/gudang...")
+        progress_callback(_progress_pct(progress_start, 1), f"[{sheet_name}] membaca struktur area/gudang...")
 
     header_row_used, tot_col = find_tot_col(ws, header_row)
     merged_map = build_merged_lookup_map(ws)
@@ -1007,12 +1020,12 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes, progress_callback=N
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
 
     if progress_callback:
-        progress_callback(progress_start + 1, f"Workbook terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
+        progress_callback(_progress_pct(progress_start, 1), f"Workbook terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
 
     for sname in wb.sheetnames:
         if su(sname) == "LAPTOP":
             if progress_callback:
-                progress_callback(progress_start + 1, "Membersihkan blok COMING di sheet LAPTOP...")
+                progress_callback(_progress_pct(progress_start, 1), "Membersihkan blok COMING di sheet LAPTOP...")
             delete_coming_block_in_laptop(wb[sname])
             break
 
@@ -1037,8 +1050,8 @@ def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes, progress_callback=N
     total_sheets = max(1, len(target_sheets))
     span = max(1, progress_end - (progress_start + 2))
     for idx, sname in enumerate(target_sheets, start=1):
-        sheet_start = progress_start + 2 + int((idx - 1) / total_sheets * span)
-        sheet_end = progress_start + 2 + int(idx / total_sheets * span)
+        sheet_start = _progress_pct(progress_start, 2) + int((idx - 1) / total_sheets * span)
+        sheet_end = _progress_pct(progress_start, 2) + int(idx / total_sheets * span)
         sheet_end = max(sheet_start + 1, sheet_end)
 
         if progress_callback:
@@ -1701,7 +1714,7 @@ def load_addon_map_generic(addon_bytes: bytes, progress_callback=None, progress_
     price_candidates = ["harga", "HARGA", "Price", "PRICE", "Harga"]
 
     if progress_callback:
-        progress_callback(progress_start + 1, "Mencari header Addon Mapping...")
+        progress_callback(_progress_pct(progress_start, 1), "Mencari header Addon Mapping...")
     header_row = None
     code_col = None
     price_col = None
@@ -1715,12 +1728,12 @@ def load_addon_map_generic(addon_bytes: bytes, progress_callback=None, progress_
         raise ValueError("Header Addon Mapping tidak ketemu. Pastikan ada kolom addon_code & harga (atau setara).")
 
     if progress_callback:
-        progress_callback(progress_start + 2, f"Header Addon ketemu di row {header_row}. Membaca kode addon...")
+        progress_callback(_progress_pct(progress_start, 2), f"Header Addon ketemu di row {header_row}. Membaca kode addon...")
     addon_map: Dict[str, int] = {}
     total_rows = max(1, (ws.max_row or header_row) - header_row)
     for idx, row_vals in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=1):
         if progress_callback and (idx == 1 or idx % 500 == 0):
-            progress_tick(progress_callback, progress_start + 2, progress_end, idx, total_rows, f"Scan Addon Mapping: {idx}/{total_rows} baris, {len(addon_map)} kode terbaca...")
+            progress_tick(progress_callback, _progress_pct(progress_start, 2), progress_end, idx, total_rows, f"Scan Addon Mapping: {idx}/{total_rows} baris, {len(addon_map)} kode terbaca...")
         code = normalize_addon_code(row_vals[code_col - 1] if len(row_vals) >= code_col else None)
         if not code:
             continue
@@ -1770,15 +1783,15 @@ def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str], progress_c
     ws = get_change_sheet(wb)
     reset_readonly_dimensions_if_needed(ws)
     if progress_callback:
-        progress_callback(progress_start + 1, "Mencari header sheet CHANGE...")
+        progress_callback(_progress_pct(progress_start, 1), "Mencari header sheet CHANGE...")
     header_row, sku_col, price_cols = find_header_row_and_cols_pricelist_fixed(ws, needed_cols)
     result: Dict[str, Dict[str, int]] = {}
     total_rows = max(1, (ws.max_row or header_row) - header_row)
     if progress_callback:
-        progress_callback(progress_start + 2, f"Header harga ketemu di row {header_row}. Scan {total_rows} baris...")
+        progress_callback(_progress_pct(progress_start, 2), f"Header harga ketemu di row {header_row}. Scan {total_rows} baris...")
     for idx, row_vals in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=1):
         if progress_callback and (idx == 1 or idx % 1000 == 0):
-            progress_tick(progress_callback, progress_start + 2, progress_end, idx, total_rows, f"Scan Pricelist harga CHANGE: {idx}/{total_rows} baris, {len(result)} SKU terbaca...")
+            progress_tick(progress_callback, _progress_pct(progress_start, 2), progress_end, idx, total_rows, f"Scan Pricelist harga CHANGE: {idx}/{total_rows} baris, {len(result)} SKU terbaca...")
         sku = norm_sku(row_vals[sku_col - 1] if len(row_vals) >= sku_col else None)
         if not sku:
             continue
@@ -1811,11 +1824,11 @@ def load_pricelist_price_map_multisheet(
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
 
     if progress_callback:
-        progress_callback(progress_start + 1, f"Workbook harga terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
+        progress_callback(_progress_pct(progress_start, 1), f"Workbook harga terbuka. Sheet terdeteksi: {len(wb.sheetnames)} sheet...")
     for sname in wb.sheetnames:
         if su(sname) == "LAPTOP":
             if progress_callback:
-                progress_callback(progress_start + 1, "Membersihkan blok COMING di sheet LAPTOP...")
+                progress_callback(_progress_pct(progress_start, 1), "Membersihkan blok COMING di sheet LAPTOP...")
             delete_coming_block_in_laptop(wb[sname])
             break
 
@@ -1824,11 +1837,11 @@ def load_pricelist_price_map_multisheet(
     parsed_sheets = 0
     total_sheets = max(1, len(target_sheets))
     if progress_callback:
-        progress_callback(progress_start + 2, f"Mulai scan harga {total_sheets} sheet: {start_sheet} s/d {end_sheet}...")
+        progress_callback(_progress_pct(progress_start, 2), f"Mulai scan harga {total_sheets} sheet: {start_sheet} s/d {end_sheet}...")
 
     for idx_sheet, sname in enumerate(target_sheets, start=1):
-        sheet_start = progress_start + 2 + int((idx_sheet - 1) / total_sheets * max(1, progress_end - progress_start - 2))
-        sheet_end = progress_start + 2 + int(idx_sheet / total_sheets * max(1, progress_end - progress_start - 2))
+        sheet_start = _progress_pct(progress_start, 2) + int((idx_sheet - 1) / total_sheets * max(1, progress_end - progress_start - 2))
+        sheet_end = _progress_pct(progress_start, 2) + int(idx_sheet / total_sheets * max(1, progress_end - progress_start - 2))
         ws = wb[sname]
         if progress_callback:
             progress_callback(sheet_start, f"Membaca sheet harga {idx_sheet}/{total_sheets}: {sname}...")
@@ -2929,7 +2942,11 @@ def run_with_loading_callback(process_fn, loading_text: str = "Memproses..."):
     status = st.empty()
 
     def update_progress(value: int, text: Optional[str] = None):
-        value = max(0, min(100, int(value)))
+        try:
+            value = int(value) if value is not None else 0
+        except Exception:
+            value = 0
+        value = max(0, min(100, value))
         msg = text or loading_text
         progress.progress(value, text=msg)
         status.caption(msg)
