@@ -457,15 +457,37 @@ def package_output_files(output_files: List[Tuple[str, bytes]], zip_name: str):
 
 def prune_worksheet_to_changed_rows(ws: Worksheet, changed_rows: List[int], data_start: int):
     if changed_rows:
-        keep = set(changed_rows)
-        for r in range(ws.max_row, data_start - 1, -1):
-            if r not in keep:
-                ws.delete_rows(r, 1)
+        rewrite_worksheet_with_rows(ws, data_start, collect_changed_row_values(ws, changed_rows))
 
 
 def append_no_changes_issue(issues: List[Dict[str, Any]], file_name: str):
     issues.append({"file": file_name, "reason": "Tidak ada baris berubah pada file ini."})
 
+
+
+
+def progress_tick(progress_callback, start_pct: int, end_pct: int, current: int, total: int, message: str):
+    """Update progress aman untuk processor besar."""
+    if not progress_callback:
+        return
+    total = max(1, int(total or 1))
+    current = max(0, min(int(current or 0), total))
+    pct = int(start_pct + (end_pct - start_pct) * (current / total))
+    progress_callback(pct, message)
+
+
+def rewrite_worksheet_with_rows(ws: Worksheet, data_start: int, row_values: List[List[Any]]):
+    """Lebih cepat daripada delete_rows satu-per-satu: hapus blok data sekali lalu tulis rows hasil."""
+    if ws.max_row >= data_start:
+        ws.delete_rows(data_start, ws.max_row - data_start + 1)
+    for out_r, row_vals in enumerate(row_values, start=data_start):
+        for c, val in enumerate(row_vals, start=1):
+            ws.cell(row=out_r, column=c).value = val
+
+
+def collect_changed_row_values(ws: Worksheet, changed_rows: List[int], max_col: Optional[int] = None) -> List[List[Any]]:
+    max_col = max_col or ws.max_column
+    return [[ws.cell(row=r, column=c).value for c in range(1, max_col + 1)] for r in changed_rows]
 
 def process_marketplace_stock_sheet(
     ws: Worksheet,
@@ -1089,14 +1111,19 @@ def write_stock_shopee_output(template_bytes: bytes, changed_rows_all: List[List
     return workbook_to_bytes(out_wb)
 
 
-def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         try:
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 70), f"Memproses Shopee {file_idx}/{total_files}: {mf.name}")
             rows, stats = collect_changed_rows_stock_shopee(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
@@ -1106,6 +1133,8 @@ def process_shopee_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
+    if progress_callback:
+        progress_callback(88, f"Membuat output Shopee ({len(changed_rows_all)} baris berubah)...")
     result_bytes = write_stock_shopee_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
     return result_bytes, issues_workbook_or_none(issues), summary
@@ -1167,14 +1196,19 @@ def write_stock_tiktokshop_output(template_bytes: bytes, changed_rows_all: List[
     return workbook_to_bytes(out_wb)
 
 
-def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     changed_rows_all: List[List[Any]] = []
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         try:
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 70), f"Memproses TikTokShop {file_idx}/{total_files}: {mf.name}")
             rows, stats = collect_changed_rows_stock_tiktokshop(mf.getvalue(), stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
             changed_rows_all.extend(rows)
             merge_summary_stats(summary, stats, ("rows_scanned", "rows_written", "rows_unchanged", "rows_unmatched"))
@@ -1184,6 +1218,8 @@ def process_tiktokshop_stock(mass_files: List[Any], pricelist_file: Any, selecte
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
+    if progress_callback:
+        progress_callback(88, f"Membuat output TikTokShop ({len(changed_rows_all)} baris berubah)...")
     result_bytes = write_stock_tiktokshop_output(mass_files[0].getvalue(), changed_rows_all)
     summary["issues_count"] = len(issues)
     return result_bytes, issues_workbook_or_none(issues), summary
@@ -1196,19 +1232,27 @@ def find_mwh_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         try:
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 70), f"Memproses Mwh {file_idx}/{total_files}: {mf.name}")
             wb = load_workbook(io.BytesIO(mf.getvalue()))
             ws = wb.active
             data_start, sku_col, qty_col = find_mwh_stock_columns(ws)
 
+            total_rows = max(1, ws.max_row - data_start + 1)
             for r in range(data_start, ws.max_row + 1):
+                if progress_callback and (r - data_start) % 2000 == 0:
+                    progress_tick(progress_callback, 15, 82, r - data_start, total_rows, f"Memproses baris Mwh {file_idx}/{total_files}: {r - data_start} baris...")
                 sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
                 if not sku_full:
                     continue
@@ -1242,6 +1286,8 @@ def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
+    if progress_callback:
+        progress_callback(88, f"Membuat output Mwh ({len(output_files)} file)...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_mwh.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -1426,13 +1472,18 @@ def find_blibli_stock_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
     return data_start, sku_col, qty_col, 0
 
 
-def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 70), f"Memproses Blibli {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
         data_start, sku_col, qty_col, _ = find_blibli_stock_columns(ws)
@@ -1459,6 +1510,8 @@ def process_blibli_stock(mass_files: List[Any], pricelist_file: Any, selected_mo
 
         output_files.append((f"hasil_update_stok_blibli_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(88, f"Membuat output Blibli ({len(output_files)} file)...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_blibli.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -1474,13 +1527,18 @@ def find_akulaku_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, qty_col
 
 
-def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist stok...")
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 70), f"Memproses Akulaku {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         data_start, sku_col, qty_col = find_akulaku_stock_columns(ws)
@@ -1507,6 +1565,8 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
 
         output_files.append((f"hasil_update_stok_akulaku_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(88, f"Membuat output Akulaku ({len(output_files)} file)...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_update_stok_akulaku.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -1682,14 +1742,19 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
 # ============================================================
 # PRICE PROCESSORS
 # ============================================================
-def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str):
+def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, page_title: str, mode: str, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga multi-sheet...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(12 + int((file_idx - 1) / total_files * 70), f"Memproses {page_title} {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
 
@@ -1746,15 +1811,29 @@ def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, add
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start_fixed - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            # Lebih cepat daripada delete row satu-per-satu.
+            # Ambil hanya baris berubah, bersihkan blok data sekali, lalu tulis ulang hasilnya.
+            max_col = ws.max_column
+            changed_row_values = [
+                [ws.cell(row=row_idx, column=c).value for c in range(1, max_col + 1)]
+                for row_idx in changed_rows
+            ]
+            if ws.max_row >= data_start_fixed:
+                ws.delete_rows(data_start_fixed, ws.max_row - data_start_fixed + 1)
+            for out_r, row_vals in enumerate(changed_row_values, start=data_start_fixed):
+                for c, val in enumerate(row_vals, start=1):
+                    ws.cell(row=out_r, column=c).value = val
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
 
+        if progress_callback:
+            progress_callback(12 + int(file_idx / total_files * 70), f"Menyimpan output {page_title} {file_idx}/{total_files}...")
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(90, f"Menyiapkan download {page_title}...")
+    if progress_callback:
+        progress_callback(90, f"Menyiapkan download {page_title}...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, f"hasil_{page_title.lower().replace(' ', '_')}.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -1765,7 +1844,7 @@ def _process_shopee_price_common(mass_files: List[Any], pricelist_file: Any, add
 # PRICE PROCESSORS - GROUPED BY TYPE
 # ============================================================
 # Normal Price
-def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     return _process_shopee_price_common(
         mass_files,
         pricelist_file,
@@ -1774,17 +1853,23 @@ def process_shopee_price(mass_files: List[Any], pricelist_file: Any, addon_file:
         "M4",
         "Harga Normal Shopee",
         "normal",
+        progress_callback,
     )
 
 
-def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga TikTokShop...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memproses TikTokShop {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         try:
@@ -1797,7 +1882,10 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
             continue
 
         changed_rows: List[int] = []
+        total_rows = max(1, ws.max_row - data_start + 1)
         for r in range(data_start, ws.max_row + 1):
+            if progress_callback and (r - data_start) % 2000 == 0:
+                progress_tick(progress_callback, 15, 82, r - data_start, total_rows, f"Memproses baris TikTokShop {file_idx}/{total_files}: {r - data_start} baris...")
             sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
             if not sku_full:
                 continue
@@ -1815,28 +1903,32 @@ def process_tiktokshop_price(mass_files: List[Any], pricelist_file: Any, addon_f
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            rewrite_worksheet_with_rows(ws, data_start, collect_changed_row_values(ws, changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_harga_normal_tiktokshop_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(90, "Menyiapkan download Harga Normal TikTokShop...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_tiktokshop.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
-def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
+def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga Mwh...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files), include_unchanged=True)
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         try:
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memproses Mwh {file_idx}/{total_files}: {mf.name}")
             wb = load_workbook(io.BytesIO(mf.getvalue()))
             ws = wb.active
             data_start, sku_col, price_col, _ = find_tiktok_style_columns(ws, need_price=True, scan_rows=10, data_offset=3)
@@ -1868,19 +1960,26 @@ def process_mwh_price(mass_files: List[Any], pricelist_file: Any, addon_file: An
     if summary["rows_written"] == 0 and not issues:
         issues.append({"file": "", "reason": "Tidak ada baris berubah / tidak ada SKU yang match."})
 
+    if progress_callback:
+        progress_callback(90, "Menyiapkan download Harga Normal Mwh...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_mwh.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
-def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str):
+def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, page_title: str, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, f"Membaca Pricelist {page_title}...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memproses {page_title} {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         try:
@@ -1893,7 +1992,10 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
             continue
 
         changed_rows: List[int] = []
+        total_rows = max(1, ws.max_row - data_start + 1)
         for r in range(data_start, ws.max_row + 1):
+            if progress_callback and (r - data_start) % 2000 == 0:
+                progress_tick(progress_callback, 15, 82, r - data_start, total_rows, f"Memproses baris {page_title} {file_idx}/{total_files}: {r - data_start} baris...")
             sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
             if not sku_full:
                 continue
@@ -1911,26 +2013,26 @@ def _process_powemerchant_price_common(mass_files: List[Any], pricelist_file: An
             summary["rows_written"] += 1
 
         if changed_rows:
-            keep = set(changed_rows)
-            for r in range(ws.max_row, data_start - 1, -1):
-                if r not in keep:
-                    ws.delete_rows(r, 1)
+            rewrite_worksheet_with_rows(ws, data_start, collect_changed_row_values(ws, changed_rows))
         else:
             issues.append({"file": mf.name, "reason": "Tidak ada baris berubah pada file ini."})
         output_files.append((f"hasil_{page_title.lower().replace(' ', '_')}_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(90, f"Menyiapkan download {page_title}...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, f"hasil_{page_title.lower().replace(' ', '_')}.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
 
 
-def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     return _process_powemerchant_price_common(
         mass_files,
         pricelist_file,
         addon_file,
         discount_rp,
         "Harga Normal PowerMerchant",
+        progress_callback,
     )
 
 
@@ -2056,14 +2158,19 @@ def find_blibli_price_columns(ws: Worksheet) -> Tuple[int, int, int, int]:
     return data_start, sku_col, price_col, sale_price_col
 
 
-def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga Blibli...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memproses Blibli {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb["Data"] if "Data" in wb.sheetnames else wb.active
         data_start, sku_col, price_col, sale_price_col = find_blibli_price_columns(ws)
@@ -2088,6 +2195,8 @@ def process_blibli_price(mass_files: List[Any], pricelist_file: Any, addon_file:
 
         output_files.append((f"hasil_harga_normal_blibli_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(90, "Menyiapkan download Harga Normal Blibli...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_blibli.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -2103,14 +2212,19 @@ def find_akulaku_price_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return data_start, sku_col, price_col
 
 
-def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga Akulaku...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = init_summary(len(mass_files))
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memproses Akulaku {file_idx}/{total_files}: {mf.name}")
         wb = load_workbook(io.BytesIO(mf.getvalue()))
         ws = wb.active
         data_start, sku_col, price_col = find_akulaku_price_columns(ws)
@@ -2135,6 +2249,8 @@ def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file
 
         output_files.append((f"hasil_harga_normal_akulaku_{mf.name}", workbook_to_bytes(wb)))
 
+    if progress_callback:
+        progress_callback(90, "Menyiapkan download Harga Normal Akulaku...")
     summary["issues_count"] = len(issues)
     result_bytes, result_name = package_output_files(output_files, "hasil_harga_normal_akulaku.zip")
     return result_bytes, result_name, issues_workbook_or_none(issues), summary
@@ -2144,7 +2260,7 @@ def process_akulaku_price(mass_files: List[Any], pricelist_file: Any, addon_file
 # ============================================================
 
 # Discount Price
-def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     return _process_shopee_price_common(
         mass_files,
         pricelist_file,
@@ -2153,10 +2269,13 @@ def process_shopee_discount(mass_files: List[Any], pricelist_file: Any, addon_fi
         "M4",
         "Harga Coret Shopee",
         "coret",
+        progress_callback,
     )
 
 
-def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True):
+def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file: Any, discount_rp: int, only_changed: bool = True, progress_callback=None):
+    if progress_callback:
+        progress_callback(3, "Membaca Pricelist harga coret TikTokShop...")
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     wb_in = load_workbook(io.BytesIO(input_file.getvalue()), data_only=True)
@@ -2179,7 +2298,10 @@ def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file
     summary = {"files_total": 1, "rows_scanned": 0, "rows_written": 0, "rows_unmatched": 0, "issues_count": 0}
     row_out = 2
 
+    total_rows = max(1, ws_in.max_row - 5)
     for r in range(6, ws_in.max_row + 1):
+        if progress_callback and (r - 6) % 2000 == 0:
+            progress_tick(progress_callback, 15, 85, r - 6, total_rows, f"Memproses harga coret TikTokShop: {r - 6} baris...")
         product_id = parse_number_like_id(ws_in.cell(row=r, column=1).value)
         sku_id = parse_number_like_id(ws_in.cell(row=r, column=4).value)
         old_price = parse_price_cell(ws_in.cell(row=r, column=6).value)
@@ -2202,17 +2324,20 @@ def process_tiktokshop_discount(input_file: Any, pricelist_file: Any, addon_file
         row_out += 1
         summary["rows_written"] += 1
 
+    if progress_callback:
+        progress_callback(92, "Menyimpan output Harga Coret TikTokShop...")
     summary["issues_count"] = len(issues)
     return workbook_to_bytes(out_wb), "hasil_harga_coret_tiktokshop.xlsx", issues_workbook_or_none(issues), summary
 
 
-def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int):
+def process_powemerchant_discount(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, progress_callback=None):
     return _process_powemerchant_price_common(
         mass_files,
         pricelist_file,
         addon_file,
         discount_rp,
         "Harga Coret PowerMerchant",
+        progress_callback,
     )
 
 
@@ -2260,11 +2385,13 @@ def get_row_values(ws: Worksheet, row: int, max_col: Optional[int] = None) -> Li
 
 
 
-def process_shopee_campaign(mass_file: Any, campaign_file: Any):
+def process_shopee_campaign(mass_file: Any, campaign_file: Any, progress_callback=None):
     issues: List[Dict[str, Any]] = []
     summary = init_summary(1)
 
     try:
+        if progress_callback:
+            progress_callback(5, "Membaca file mass update Shopee...")
         mass_wb = load_workbook(io.BytesIO(mass_file.getvalue()), data_only=False)
         mass_ws = mass_wb.active
 
@@ -2285,7 +2412,10 @@ def process_shopee_campaign(mass_file: Any, campaign_file: Any):
         mass_data_start = mass_header_row + 4 if mass_header_row <= 3 else mass_header_row + 1
 
         selected_by_variant: Dict[str, Dict[str, Any]] = {}
+        total_mass_rows = max(1, mass_ws.max_row - mass_data_start + 1)
         for r in range(mass_data_start, mass_ws.max_row + 1):
+            if progress_callback and (r - mass_data_start) % 2000 == 0:
+                progress_tick(progress_callback, 15, 45, r - mass_data_start, total_mass_rows, f"Scan SKU campaign Shopee: {r - mass_data_start} baris...")
             sku_full = s_clean(mass_ws.cell(row=r, column=mass_cols["sku"]).value)
             if not sku_full:
                 continue
@@ -2321,6 +2451,8 @@ def process_shopee_campaign(mass_file: Any, campaign_file: Any):
                 "reason": "Tidak ada SKU yang sama persis dengan ND-ALL-CAMPAIGN di file mass update.",
             })
 
+        if progress_callback:
+            progress_callback(50, "Membaca file campaign Shopee...")
         campaign_wb = load_workbook(io.BytesIO(campaign_file.getvalue()))
         campaign_ws = campaign_wb.active
         campaign_header_row, campaign_cols = find_header_row_with_columns(
@@ -2339,12 +2471,13 @@ def process_shopee_campaign(mass_file: Any, campaign_file: Any):
                 existing_data_rows.append(r)
 
         if existing_data_rows:
-            for r in range(campaign_ws.max_row, campaign_data_start - 1, -1):
+            keep_rows_data = []
+            for r in range(campaign_data_start, campaign_ws.max_row + 1):
                 variant = parse_number_like_id(campaign_ws.cell(row=r, column=campaign_cols["variation_id"]).value)
-                if variant not in selected_by_variant:
-                    campaign_ws.delete_rows(r, 1)
-                else:
+                if variant in selected_by_variant:
+                    keep_rows_data.append(get_row_values(campaign_ws, r))
                     summary["rows_written"] += 1
+            rewrite_worksheet_with_rows(campaign_ws, campaign_data_start, keep_rows_data)
             if summary["rows_written"] == 0:
                 issues.append({
                     "file": campaign_file.name,
@@ -2379,6 +2512,8 @@ def process_shopee_campaign(mass_file: Any, campaign_file: Any):
         if summary["rows_written"] == 0 and not issues:
             issues.append({"file": campaign_file.name, "reason": "Tidak ada baris yang masuk hasil Submit Campaign Shopee."})
 
+        if progress_callback:
+            progress_callback(92, "Menyimpan output Submit Campaign Shopee...")
         summary["issues_count"] = len(issues)
         return workbook_to_bytes(campaign_wb), f"hasil_submit_campaign_shopee_{campaign_file.name}", issues_workbook_or_none(issues), summary
 
@@ -2389,7 +2524,7 @@ def process_shopee_campaign(mass_file: Any, campaign_file: Any):
         return workbook_to_bytes(empty_wb), "hasil_submit_campaign_shopee.xlsx", issues_workbook_or_none(issues), summary
 
 
-def process_tiktokshop_campaign(mass_files: List[Any]):
+def process_tiktokshop_campaign(mass_files: List[Any], progress_callback=None):
     issues: List[Dict[str, Any]] = []
     output_files: List[Tuple[str, bytes]] = []
     summary = {
@@ -2400,7 +2535,10 @@ def process_tiktokshop_campaign(mass_files: List[Any]):
         "issues_count": 0,
     }
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
+        if progress_callback:
+            progress_callback(10 + int((file_idx - 1) / total_files * 75), f"Memfilter campaign TikTokShop {file_idx}/{total_files}: {mf.name}")
         src_wb = load_workbook(io.BytesIO(mf.getvalue()))
         src_ws = src_wb.active
 
@@ -2456,6 +2594,8 @@ def process_tiktokshop_campaign(mass_files: List[Any]):
 
         output_files.append((f"hasil_submit_campaign_tiktokshop_{mf.name}", workbook_to_bytes(out_wb)))
 
+    if progress_callback:
+        progress_callback(90, "Menyiapkan download Submit Campaign TikTokShop...")
     summary["issues_count"] = len(issues)
 
     result_bytes, result_name = package_output_files(output_files, "hasil_submit_campaign_tiktokshop.zip")
@@ -2495,16 +2635,25 @@ def render_stock_controls(area_key_prefix: str, pricelist_file: Any, mode_key: s
         if pricelist_file is None:
             st.error("Upload Pricelist dulu.")
         else:
+            progress = st.progress(0, text="Menyiapkan Pricelist stok...")
+            status = st.empty()
             try:
+                progress.progress(10, text="Membaca file Pricelist...")
+                status.caption("Membaca sheet stok: LAPTOP, TELCO, PC HOM ELE, SOF COM SUP, ACC...")
                 _, meta = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
+                progress.progress(85, text="Menyusun daftar area dan gudang...")
                 st.session_state[loaded_areas_key] = meta
                 default_gudangs = get_default_tongle_gudangs(meta.get("gudang_options", []))
                 if default_gudangs:
                     st.session_state[f"{area_key_prefix}_gudangs"] = default_gudangs
+                progress.progress(100, text="Selesai load area/gudang.")
+                status.caption("Area dan gudang siap dipilih.")
                 st.success(
                     f"Data berhasil dimuat: {len(meta.get('area_options', []))} area, {len(meta.get('gudang_options', []))} kombinasi area-gudang"
                 )
             except Exception as e:
+                progress.progress(100, text="Gagal load area/gudang.")
+                status.caption("Gagal membaca Pricelist stok.")
                 st.error(f"Gagal load data area / gudang: {e}")
 
     meta = st.session_state.get(loaded_areas_key, {}) or {}
@@ -5838,8 +5987,8 @@ def render_update_stok_shopee():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+            result_bytes, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_shopee_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Shopee...",
             )
             cache_downloads("stock_shopee", "hasil_update_stok_shopee.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5882,8 +6031,8 @@ def render_update_stok_tiktokshop():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+            result_bytes, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_tiktokshop_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok TikTokShop...",
             )
             cache_downloads("stock_tiktokshop", "hasil_update_stok_tiktokshop.xlsx", result_bytes, issues_bytes, summary=summary)
@@ -5929,8 +6078,8 @@ def render_update_stok_mwh():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_mwh_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_mwh_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Mwh...",
             )
             cache_downloads("stock_mwh", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6018,8 +6167,8 @@ def render_update_stok_blibli():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_blibli_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Blibli...",
             )
             cache_downloads("stock_blibli", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6062,8 +6211,8 @@ def render_update_stok_akulaku():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_akulaku_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Akulaku...",
             )
             cache_downloads("stock_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6098,9 +6247,9 @@ def render_harga_normal_shopee():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_price(
-                    mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_shopee_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, progress_callback
                 ),
                 "Memproses harga normal Shopee...",
             )
@@ -6138,8 +6287,8 @@ def render_harga_normal_blibli():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_blibli_price(mass_files, pricelist_file, addon_file, discount_rp),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_blibli_price(mass_files, pricelist_file, addon_file, discount_rp, progress_callback),
                 "Memproses harga normal Blibli...",
             )
             cache_downloads("normal_blibli", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6174,8 +6323,8 @@ def render_harga_normal_akulaku():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_akulaku_price(mass_files, pricelist_file, addon_file, discount_rp),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_akulaku_price(mass_files, pricelist_file, addon_file, discount_rp, progress_callback),
                 "Memproses harga normal Akulaku...",
             )
             cache_downloads("normal_akulaku", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6210,9 +6359,9 @@ def render_harga_coret_shopee():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_discount(
-                    mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_shopee_discount(
+                    mass_files, pricelist_file, addon_file, discount_rp, progress_callback
                 ),
                 "Memproses harga coret Shopee...",
             )
@@ -6248,9 +6397,9 @@ def render_harga_normal_tiktokshop():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_price(
-                    mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_tiktokshop_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, progress_callback
                 ),
                 "Memproses harga normal TikTokShop...",
             )
@@ -6294,9 +6443,9 @@ def render_harga_normal_mwh():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_mwh_price(
-                    mass_files, pricelist_file, addon_file, discount_rp, price_key
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_mwh_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, price_key, progress_callback
                 ),
                 "Memproses harga normal Mwh...",
             )
@@ -6327,9 +6476,9 @@ def render_harga_coret_tiktokshop():
             st.error("Upload semua file yang dibutuhkan dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_discount(
-                    input_file, pricelist_file, addon_file, discount_rp, True
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_tiktokshop_discount(
+                    input_file, pricelist_file, addon_file, discount_rp, True, progress_callback
                 ),
                 "Memproses harga coret TikTokShop...",
             )
@@ -6365,9 +6514,9 @@ def render_harga_normal_powemerchant():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_powemerchant_price(
-                    mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_powemerchant_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, progress_callback
                 ),
                 "Memproses harga normal PowerMerchant...",
             )
@@ -6403,9 +6552,9 @@ def render_harga_coret_powemerchant():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_powemerchant_discount(
-                    mass_files, pricelist_file, addon_file, discount_rp
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_powemerchant_discount(
+                    mass_files, pricelist_file, addon_file, discount_rp, progress_callback
                 ),
                 "Memproses harga coret PowerMerchant...",
             )
@@ -6490,8 +6639,8 @@ def render_submit_campaign_shopee():
             st.error("Upload File Mass Update dan File Campaign dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_shopee_campaign(mass_file=mass_file, campaign_file=campaign_file),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_shopee_campaign(mass_file=mass_file, campaign_file=campaign_file, progress_callback=progress_callback),
                 "Memproses Submit Campaign Shopee...",
             )
             cache_downloads(
@@ -6531,8 +6680,8 @@ def render_submit_campaign_tiktokshop():
             return
 
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_tiktokshop_campaign(mass_files=mass_files),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_tiktokshop_campaign(mass_files=mass_files, progress_callback=progress_callback),
                 "Memfilter template campaign TikTokShop...",
             )
             cache_downloads(
@@ -6630,10 +6779,12 @@ def find_product_id_col_any_row(ws: Worksheet, scan_rows: int = 10) -> Tuple[Opt
     )
 
 
-def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_file: Any, harga_key: str, margin_min: float, margin_max: float):
+def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_file: Any, harga_key: str, margin_min: float, margin_max: float, progress_callback=None):
     issues: List[Dict[str, Any]] = []
     summary = init_summary(1)
 
+    if progress_callback:
+        progress_callback(5, "Membaca PL MGR dan menghitung margin...")
     margin_df = build_margin_df_for_affiliate(pl_mgr_file.getvalue(), harga_key)
     if margin_df.empty:
         raise ValueError("PL MGR tidak menghasilkan data margin. Pastikan ada KODEBARANG, M0, dan kolom harga yang dipilih.")
@@ -6643,6 +6794,8 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
     if not selected_skus:
         issues.append({"file": pl_mgr_file.name, "reason": "Tidak ada KODEBARANG yang masuk range margin terpilih."})
 
+    if progress_callback:
+        progress_callback(25, "Membaca file mass update Affiliate...")
     mass_wb = load_workbook(io.BytesIO(mass_file.getvalue()), data_only=True, read_only=False)
     mass_ws = mass_wb["Template"] if "Template" in mass_wb.sheetnames else mass_wb.active
     pid_header_row, product_id_col = find_product_id_col_any_row(mass_ws, scan_rows=10)
@@ -6654,7 +6807,10 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
 
     data_start = max([x for x in [pid_header_row, sku_header_row] if x is not None]) + 3
     product_ids: Set[str] = set()
+    total_mass_rows = max(1, mass_ws.max_row - data_start + 1)
     for r in range(data_start, mass_ws.max_row + 1):
+        if progress_callback and (r - data_start) % 2000 == 0:
+            progress_tick(progress_callback, 35, 60, r - data_start, total_mass_rows, f"Scan mass update Affiliate: {r - data_start} baris...")
         seller_sku_full = s_clean(mass_ws.cell(row=r, column=seller_sku_col).value)
         if not seller_sku_full:
             continue
@@ -6669,6 +6825,8 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
     if not product_ids:
         issues.append({"file": mass_file.name, "reason": "Tidak ada ID Produk di Mass Update yang cocok dengan KODEBARANG dari range margin."})
 
+    if progress_callback:
+        progress_callback(65, "Membaca file Affiliate dan update komisi...")
     aff_wb = load_workbook(io.BytesIO(affiliate_file.getvalue()), data_only=False, read_only=False)
     aff_ws = aff_wb.active
     aff_pid_header_row, aff_product_id_col = find_product_id_col_any_row(aff_ws, scan_rows=10)
@@ -6695,6 +6853,8 @@ def process_affiliate_tiktokshop(mass_file: Any, pl_mgr_file: Any, affiliate_fil
         issues.append({"file": affiliate_file.name, "reason": "Tidak ada ID Produk di File Affiliate yang cocok."})
 
     summary["rows_unmatched"] = max(0, len(product_ids) - summary["rows_written"])
+    if progress_callback:
+        progress_callback(92, "Menyimpan output Affiliate TikTokShop...")
     summary["issues_count"] = len(issues)
     return workbook_to_bytes(aff_wb), f"hasil_affiliate_tiktokshop_{affiliate_file.name}", issues_workbook_or_none(issues), summary, margin_df
 
@@ -6757,8 +6917,8 @@ def render_affiliate_tiktokshop():
             st.error("Upload File Mass Update, PL MGR, dan File Affiliate dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary, margin_df = run_with_loading(
-                lambda: process_affiliate_tiktokshop(mass_file, pl_mgr_file, affiliate_file, harga_key, margin_range[0], margin_range[1]),
+            result_bytes, result_name, issues_bytes, summary, margin_df = run_with_loading_callback(
+                lambda progress_callback: process_affiliate_tiktokshop(mass_file, pl_mgr_file, affiliate_file, harga_key, margin_range[0], margin_range[1], progress_callback),
                 "Memproses Affiliate TikTokShop...",
             )
             cache_downloads("affiliate_tiktokshop", result_name, result_bytes, issues_bytes, summary=summary)
