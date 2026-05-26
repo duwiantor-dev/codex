@@ -47,6 +47,7 @@ SESSION_DEFAULTS = {
     "stock_bigseller_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_blibli_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
     "stock_akulaku_areas_loaded": {"area_options": [], "gudang_options": [], "default_gudang_options": []},
+    "issue_output_mode": "Info saja",
 }
 for _k, _v in SESSION_DEFAULTS.items():
     if _k not in st.session_state:
@@ -398,8 +399,37 @@ def merge_summary_stats(summary: Dict[str, Any], stats: Dict[str, Any], keys: Tu
         summary[key] = int(summary.get(key, 0)) + int(stats.get(key, 0))
 
 
+def normalize_issue_reason(reason: str) -> str:
+    reason = s_clean(reason)
+    if not reason:
+        return "Issue tidak diketahui"
+    if "tidak ada di Pricelist" in reason and reason.startswith("Base SKU"):
+        return "Base SKU tidak ada di Pricelist"
+    if "tidak ada di file Addon Mapping" in reason and reason.startswith("Addon"):
+        return "Addon tidak ada di file Addon Mapping"
+    if reason.startswith("Harga hasil") and "<= 0" in reason:
+        return "Harga hasil <= 0"
+    if reason.startswith("Harga ") and "kosong di Pricelist" in reason:
+        return "Harga kosong di Pricelist"
+    return reason
+
+
+def summarize_issues_text(issues: List[Dict[str, Any]], max_items: int = 50) -> List[str]:
+    counter: Dict[str, int] = {}
+    for item in issues or []:
+        reason = normalize_issue_reason(item.get("reason", ""))
+        counter[reason] = counter.get(reason, 0) + 1
+    return [f"{count}x {reason}" for reason, count in sorted(counter.items(), key=lambda x: (-x[1], x[0]))[:max_items]]
+
+
 def issues_workbook_or_none(issues: List[Dict[str, Any]]) -> Optional[bytes]:
-    return make_issues_workbook(issues) if issues else None
+    # Default lebih cepat: issue hanya ditampilkan sebagai info/ringkasan, tanpa membuat Excel issue.
+    st.session_state["_last_issue_info"] = summarize_issues_text(issues)
+    if not issues:
+        return None
+    if st.session_state.get("issue_output_mode", "Info saja") == "Excel":
+        return make_issues_workbook(issues)
+    return None
 
 
 def package_output_files(output_files: List[Tuple[str, bytes]], zip_name: str):
@@ -541,7 +571,10 @@ def cache_downloads(
     }
     if summary is not None:
         st.session_state.summary_cache[cache_key] = summary
-    st.session_state.issue_preview_cache[cache_key] = build_issue_preview_from_bytes(issues_bytes)
+    if issues_bytes:
+        st.session_state.issue_preview_cache[cache_key] = build_issue_preview_from_bytes(issues_bytes)
+    else:
+        st.session_state.issue_preview_cache[cache_key] = list(st.session_state.get("_last_issue_info", []))
 
 
 def render_issue_preview(cache_key: str):
@@ -1064,7 +1097,7 @@ def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
     return header_row + 1, found_cols["sku"], found_cols["qty"]
 
 
-def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False):
+def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected_modes: Set[str], chosen_areas: Set[str], chosen_gudangs: Set[str], zero_below: int = 0, zero_if_missing: bool = False, progress_callback=None):
     stock_lookup, _ = build_stock_lookup_from_pricelist_bytes(pricelist_file.getvalue())
     issues: List[Dict[str, Any]] = []
     summary = init_summary(len(mass_files))
@@ -1090,10 +1123,13 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
         current_rows = []
         current_part += 1
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         wb = None
         try:
-            wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=False, data_only=False)
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 80), f"Membaca BigSeller {file_idx}/{total_files}...")
+            wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=True, data_only=False)
             ws = wb.worksheets[0]
             data_start, sku_col, qty_col = find_bigseller_stock_columns(ws)
 
@@ -1102,13 +1138,16 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                 output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
                 header_len = ws.max_column
 
-            for r in range(data_start, ws.max_row + 1):
-                sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            for r, row_vals_raw in enumerate(ws.iter_rows(min_row=data_start, values_only=True), start=data_start):
+                row_vals = list(row_vals_raw[:header_len])
+                if len(row_vals) < header_len:
+                    row_vals.extend([None] * (header_len - len(row_vals)))
+                sku_full = s_clean(row_vals[sku_col - 1] if len(row_vals) >= sku_col else None)
                 if not sku_full:
                     continue
 
                 summary["rows_scanned"] += 1
-                old_qty = to_int_or_none(ws.cell(row=r, column=qty_col).value)
+                old_qty = to_int_or_none(row_vals[qty_col - 1] if len(row_vals) >= qty_col else None)
                 new_qty = pick_stock_value(sku_full, stock_lookup, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing)
 
                 if new_qty is None:
@@ -1126,13 +1165,15 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                 if old_qty is not None and int(old_qty) == int(new_qty):
                     continue
 
-                row_vals = [ws.cell(row=r, column=c).value for c in range(1, header_len + 1)]
                 row_vals[qty_col - 1] = int(new_qty)
                 current_rows.append(row_vals)
                 summary["rows_written"] += 1
 
                 if len(current_rows) >= BIGSELLER_MAX_ROWS_PER_FILE:
                     flush_part()
+
+                if progress_callback and summary["rows_scanned"] % 2000 == 0:
+                    progress_callback(10 + int((file_idx - 0.5) / total_files * 80), f"Memproses BigSeller {file_idx}/{total_files}: {summary['rows_scanned']} baris...")
 
         except Exception as e:
             issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
@@ -1683,7 +1724,7 @@ def process_powemerchant_price(mass_files: List[Any], pricelist_file: Any, addon
     )
 
 
-def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str):
+def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_file: Any, discount_rp: int, price_key: str, progress_callback=None):
     price_map = load_pricelist_price_map_multisheet(pricelist_file.getvalue(), ["M3", "M4"])
     addon_map = load_addon_map_generic(addon_file.getvalue())
     issues: List[Dict[str, Any]] = []
@@ -1710,10 +1751,13 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
         current_rows = []
         current_part += 1
 
-    for mf in mass_files:
+    total_files = max(1, len(mass_files))
+    for file_idx, mf in enumerate(mass_files, start=1):
         wb = None
         try:
-            wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=False, data_only=False)
+            if progress_callback:
+                progress_callback(10 + int((file_idx - 1) / total_files * 80), f"Membaca BigSeller {file_idx}/{total_files}...")
+            wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=True, data_only=False)
             ws = wb.worksheets[0]
 
             header_row, found_cols = find_header_row_by_candidates(
@@ -1732,20 +1776,24 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
                 output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
                 header_len = ws.max_column
 
-            for r in range(header_row + 1, ws.max_row + 1):
-                sku_full = s_clean(ws.cell(row=r, column=sku_col).value)
+            for offset, row_vals_raw in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1):
+                row_vals = list(row_vals_raw[:header_len])
+                if len(row_vals) < header_len:
+                    row_vals.extend([None] * (header_len - len(row_vals)))
+
+                sku_full = s_clean(row_vals[sku_col - 1] if len(row_vals) >= sku_col else None)
                 if not sku_full:
                     continue
 
                 summary["rows_scanned"] += 1
-                old_price = parse_price_cell(ws.cell(row=r, column=harga_col).value)
+                old_price = parse_price_cell(row_vals[harga_col - 1] if len(row_vals) >= harga_col else None)
                 new_price, reason = compute_price_from_maps(sku_full, price_map, addon_map, price_key, discount_rp)
 
                 if new_price is None:
                     summary["rows_unmatched"] += 1
                     issues.append({
                         "file": mf.name,
-                        "row": r,
+                        "row": offset,
                         "sku_full": sku_full,
                         "old_value": old_price,
                         "new_value": "",
@@ -1756,13 +1804,15 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
                 if old_price is not None and int(old_price) == int(new_price):
                     continue
 
-                row_vals = [ws.cell(row=r, column=c).value for c in range(1, header_len + 1)]
-                row_vals[harga_col - 1] = new_price
+                row_vals[harga_col - 1] = int(new_price)
                 current_rows.append(row_vals)
                 summary["rows_written"] += 1
 
                 if len(current_rows) >= BIGSELLER_MAX_ROWS_PER_FILE:
                     flush_part()
+
+                if progress_callback and summary["rows_scanned"] % 2000 == 0:
+                    progress_callback(10 + int((file_idx - 0.5) / total_files * 80), f"Memproses BigSeller {file_idx}/{total_files}: {summary['rows_scanned']} baris...")
 
         except Exception as e:
             issues.append({"file": mf.name, "reason": f"Gagal proses file: {e}"})
@@ -2302,10 +2352,21 @@ def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
 
 def run_with_loading(process_fn, loading_text: str = "Memproses..."):
     progress = st.progress(0, text=loading_text)
+
+    def update_progress(value: int, text: Optional[str] = None):
+        value = max(0, min(100, int(value)))
+        progress.progress(value, text=text or loading_text)
+
     try:
-        progress.progress(20, text=loading_text)
-        result = process_fn()
-        progress.progress(100, text="Selesai")
+        update_progress(5, loading_text)
+        # Fungsi yang sudah dioptimasi bisa menerima callback progress.
+        import inspect
+        if len(inspect.signature(process_fn).parameters) >= 1:
+            result = process_fn(update_progress)
+        else:
+            update_progress(20, loading_text)
+            result = process_fn()
+        update_progress(100, "Selesai")
         return result
     finally:
         progress.empty()
@@ -5683,7 +5744,7 @@ def render_update_stok_bigseller():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing),
+                lambda progress_callback=None: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Bigseller...",
             )
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6158,8 +6219,8 @@ def render_harga_normal_bigseller():
             return
         try:
             result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda: process_bigseller_price(
-                    mass_files, pricelist_file, addon_file, discount_rp, price_key
+                lambda progress_callback=None: process_bigseller_price(
+                    mass_files, pricelist_file, addon_file, discount_rp, price_key, progress_callback
                 ),
                 "Memproses harga normal Bigseller...",
             )
@@ -6654,6 +6715,13 @@ def render_analisa_margin():
 
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
+    st.session_state["issue_output_mode"] = st.sidebar.radio(
+        "Tampilan Issue",
+        ["Info saja", "Excel"],
+        index=0 if st.session_state.get("issue_output_mode", "Info saja") == "Info saja" else 1,
+        horizontal=True,
+        key="sidebar_issue_output_mode",
+    )
 
     group = st.sidebar.radio(
         "Menu Utama",
