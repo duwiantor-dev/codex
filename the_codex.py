@@ -311,6 +311,22 @@ def get_first_sheet(wb) -> Worksheet:
     return wb[wb.sheetnames[0]]
 
 
+def reset_readonly_dimensions_if_needed(ws):
+    """Fix template Excel yang dimension metadata-nya salah (sering terbaca hanya kolom A di read_only)."""
+    try:
+        if hasattr(ws, "reset_dimensions"):
+            ws.reset_dimensions()
+    except Exception:
+        pass
+
+
+def get_row_values_readonly(ws, row_num: int) -> List[Any]:
+    try:
+        return list(next(ws.iter_rows(min_row=row_num, max_row=row_num, values_only=True)))
+    except StopIteration:
+        return []
+
+
 def build_merged_lookup_map(ws: Worksheet) -> Dict[Tuple[int, int], object]:
     merged_map: Dict[Tuple[int, int], object] = {}
     for mr in ws.merged_cells.ranges:
@@ -639,6 +655,115 @@ def find_header_row_by_candidates(
         if ok:
             return r, found
     raise ValueError("Header tidak ditemukan. Pastikan file memiliki kolom yang dibutuhkan.")
+
+
+def normalize_header_token(v) -> str:
+    return re.sub(r"[^a-z0-9]", "", s_clean(v).lower())
+
+
+def _header_match_score(header_token: str, candidates: List[str], *, excludes: Optional[List[str]] = None) -> int:
+    if not header_token:
+        return 0
+    excludes_norm = [normalize_header_token(x) for x in (excludes or []) if normalize_header_token(x)]
+    if any(x and x in header_token for x in excludes_norm):
+        return 0
+    best = 0
+    for cand in candidates:
+        cand_token = normalize_header_token(cand)
+        if not cand_token:
+            continue
+        if header_token == cand_token:
+            best = max(best, 100)
+        elif cand_token in header_token:
+            best = max(best, 70)
+        elif header_token in cand_token and len(header_token) >= 3:
+            best = max(best, 55)
+    return best
+
+
+def find_header_row_by_candidates_flexible(
+    ws: Worksheet,
+    required_candidates: Dict[str, List[str]],
+    *,
+    scan_rows: int = 30,
+    excludes: Optional[Dict[str, List[str]]] = None,
+) -> Tuple[int, Dict[str, int]]:
+    # BigSeller export kadang punya worksheet dimension metadata salah,
+    # sehingga read_only hanya membaca kolom A. Reset dulu agar kolom H/K ikut terbaca.
+    reset_readonly_dimensions_if_needed(ws)
+
+    excludes = excludes or {}
+    last_headers: List[str] = []
+    max_scan = min(scan_rows, ws.max_row or scan_rows)
+
+    for r in range(1, max_scan + 1):
+        headers = get_row_values_readonly(ws, r)
+        headers_clean = [s_clean(v) for v in headers]
+        if any(headers_clean):
+            last_headers = [h for h in headers_clean if h]
+
+        found: Dict[str, int] = {}
+        used_cols: Set[int] = set()
+
+        for key, candidates in required_candidates.items():
+            best_col = None
+            best_score = 0
+            for idx, header in enumerate(headers_clean, start=1):
+                if idx in used_cols:
+                    continue
+                token = normalize_header_token(header)
+                if not token:
+                    continue
+
+                # Exact match harus menang. Jangan sampai cell warning seperti
+                # "Peringatan: Jangan Mengubah Product_ID dan Sku_ID!" dianggap header.
+                cand_tokens = [normalize_header_token(c) for c in candidates if normalize_header_token(c)]
+                if token in cand_tokens:
+                    score = 100
+                else:
+                    score = _header_match_score(token, candidates, excludes=excludes.get(key))
+
+                if score > best_score:
+                    best_score = score
+                    best_col = idx
+
+            if best_col is not None and best_score > 0:
+                found[key] = best_col
+                used_cols.add(best_col)
+
+        if set(required_candidates.keys()).issubset(found.keys()):
+            return r, found
+
+    preview = last_headers[:12]
+    raise ValueError(f"Header tidak ditemukan. Header terbaca: {preview}")
+
+
+def find_bigseller_omnichannel_columns(ws: Worksheet, *, mode: str) -> Tuple[int, Dict[str, int]]:
+    sku_candidates = [
+        "Seller SKU", "SKU Penjual", "SKU", "Product SKU", "Merchant SKU",
+        "SKU Ref. No.(Optional)", "SKU Ref No Optional", "SKU Ref No", "Kode Barang", "Kodebarang",
+    ]
+    sku_excludes = ["SKU ID", "ID SKU", "Product ID", "ID Produk", "Variation ID", "Variant ID", "Goods ID", "Item ID"]
+
+    if mode == "stock":
+        target_candidates = ["Stock", "Stok", "Quantity", "Qty", "Available Stock", "Warehouse Stock", "Jumlah", "Inventory"]
+        target_excludes = ["Stock ID", "Warehouse ID", "SKU ID"]
+        target_key = "qty"
+    else:
+        target_candidates = [
+            "Price", "Harga", "Harga Jual", "Selling Price", "Sale Price", "Retail Price",
+            "Normal Price", "Harga Normal", "Original Price", "Local Currency", "Mata Uang Lokal",
+            "Harga Produk", "Product Price", "Unit Price",
+        ]
+        target_excludes = ["Price ID", "Harga ID", "Discount", "Diskon", "Promo", "Campaign"]
+        target_key = "price"
+
+    return find_header_row_by_candidates_flexible(
+        ws,
+        {"sku": sku_candidates, target_key: target_candidates},
+        scan_rows=40,
+        excludes={"sku": sku_excludes, target_key: target_excludes},
+    )
 
 
 # ============================================================
@@ -1086,14 +1211,7 @@ def process_mwh_stock(mass_files: List[Any], pricelist_file: Any, selected_modes
 
 
 def find_bigseller_stock_columns(ws: Worksheet) -> Tuple[int, int, int]:
-    header_row, found_cols = find_header_row_by_candidates(
-        ws,
-        {
-            "sku": ["SKU", "Seller SKU", "SKU Penjual"],
-            "qty": ["Stock", "Stok", "Quantity", "Qty"],
-        },
-        scan_rows=10,
-    )
+    header_row, found_cols = find_bigseller_omnichannel_columns(ws, mode="stock")
     return header_row + 1, found_cols["sku"], found_cols["qty"]
 
 
@@ -1131,12 +1249,15 @@ def process_bigseller_stock(mass_files: List[Any], pricelist_file: Any, selected
                 progress_callback(10 + int((file_idx - 1) / total_files * 80), f"Membaca BigSeller {file_idx}/{total_files}...")
             wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=True, data_only=False)
             ws = wb.worksheets[0]
+            reset_readonly_dimensions_if_needed(ws)
             data_start, sku_col, qty_col = find_bigseller_stock_columns(ws)
 
             if not output_header:
                 header_row = data_start - 1
-                output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
-                header_len = ws.max_column
+                output_header = get_row_values_readonly(ws, header_row)
+                header_len = max(len(output_header), sku_col, qty_col)
+                if len(output_header) < header_len:
+                    output_header.extend([None] * (header_len - len(output_header)))
 
             for r, row_vals_raw in enumerate(ws.iter_rows(min_row=data_start, values_only=True), start=data_start):
                 row_vals = list(row_vals_raw[:header_len])
@@ -1759,22 +1880,18 @@ def process_bigseller_price(mass_files: List[Any], pricelist_file: Any, addon_fi
                 progress_callback(10 + int((file_idx - 1) / total_files * 80), f"Membaca BigSeller {file_idx}/{total_files}...")
             wb = load_workbook(io.BytesIO(mf.getvalue()), read_only=True, data_only=False)
             ws = wb.worksheets[0]
+            reset_readonly_dimensions_if_needed(ws)
 
-            header_row, found_cols = find_header_row_by_candidates(
-                ws,
-                {
-                    "sku": ["SKU", "Seller SKU", "SKU Penjual"],
-                    "price": ["Price", "Harga", "Harga Jual"],
-                },
-                scan_rows=10,
-            )
+            header_row, found_cols = find_bigseller_omnichannel_columns(ws, mode="price")
 
             sku_col = found_cols["sku"]
             harga_col = found_cols["price"]
 
             if not output_header:
-                output_header = [ws.cell(row=header_row, column=c).value for c in range(1, ws.max_column + 1)]
-                header_len = ws.max_column
+                output_header = get_row_values_readonly(ws, header_row)
+                header_len = max(len(output_header), sku_col, harga_col)
+                if len(output_header) < header_len:
+                    output_header.extend([None] * (header_len - len(output_header)))
 
             for offset, row_vals_raw in enumerate(ws.iter_rows(min_row=header_row + 1, values_only=True), start=header_row + 1):
                 row_vals = list(row_vals_raw[:header_len])
@@ -2351,6 +2468,19 @@ def validate_mass_uploads(mass_files: List[Any]) -> Optional[str]:
 
 
 def run_with_loading(process_fn, loading_text: str = "Memproses..."):
+    # Aman untuk semua fitur lama: tidak mengubah cara pemanggilan process_fn.
+    progress = st.progress(0, text=loading_text)
+    try:
+        progress.progress(20, text=loading_text)
+        result = process_fn()
+        progress.progress(100, text="Selesai")
+        return result
+    finally:
+        progress.empty()
+
+
+def run_with_loading_callback(process_fn, loading_text: str = "Memproses..."):
+    # Khusus fitur yang memang support progress_callback, saat ini BigSeller.
     progress = st.progress(0, text=loading_text)
 
     def update_progress(value: int, text: Optional[str] = None):
@@ -2359,13 +2489,7 @@ def run_with_loading(process_fn, loading_text: str = "Memproses..."):
 
     try:
         update_progress(5, loading_text)
-        # Fungsi yang sudah dioptimasi bisa menerima callback progress.
-        import inspect
-        if len(inspect.signature(process_fn).parameters) >= 1:
-            result = process_fn(update_progress)
-        else:
-            update_progress(20, loading_text)
-            result = process_fn()
+        result = process_fn(update_progress)
         update_progress(100, "Selesai")
         return result
     finally:
@@ -5722,9 +5846,9 @@ def render_update_stok_bigseller():
     )
     c1, c2 = st.columns(2)
     with c1:
-        mass_files = st.file_uploader("Upload Mass Update Bigseller", type=["xlsx"], accept_multiple_files=True, key="stock_bigseller_mass")
+        mass_files = st.file_uploader("Upload Mass Update Bigseller", type=["xlsx"], accept_multiple_files=True, key="stock_bigseller_mass_v2")
     with c2:
-        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl")
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="stock_bigseller_pl_v2")
 
     selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, process_disabled = render_stock_controls(
         area_key_prefix="stock_bigseller",
@@ -5743,8 +5867,8 @@ def render_update_stok_bigseller():
             st.error("Upload Pricelist dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda progress_callback=None: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_bigseller_stock(mass_files, pricelist_file, selected_modes, chosen_areas, chosen_gudangs, zero_below, zero_if_missing, progress_callback),
                 "Memproses update stok Bigseller...",
             )
             cache_downloads("stock_bigseller", result_name, result_bytes, issues_bytes, summary=summary)
@@ -6196,11 +6320,11 @@ def render_harga_normal_bigseller():
     )
     c1, c2, c3 = st.columns(3)
     with c1:
-        mass_files = st.file_uploader("Upload Mass Update", type=["xlsx"], accept_multiple_files=True, key="normal_bigseller_mass")
+        mass_files = st.file_uploader("Upload Mass Update", type=["xlsx"], accept_multiple_files=True, key="normal_bigseller_mass_v2")
     with c2:
-        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="normal_bigseller_pl")
+        pricelist_file = st.file_uploader("Upload Pricelist", type=["xlsx"], key="normal_bigseller_pl_v2")
     with c3:
-        addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_bigseller_add")
+        addon_file = st.file_uploader("Upload Addon Mapping", type=["xlsx"], key="normal_bigseller_add_v2")
     discount_rp = st.number_input("Diskon (Rp)", min_value=0, value=0, step=1000, key="normal_bigseller_disc")
     price_key = st.radio(
         "Ambil harga dari Pricelist",
@@ -6218,8 +6342,8 @@ def render_harga_normal_bigseller():
             st.error("Upload Pricelist dan Addon Mapping dulu.")
             return
         try:
-            result_bytes, result_name, issues_bytes, summary = run_with_loading(
-                lambda progress_callback=None: process_bigseller_price(
+            result_bytes, result_name, issues_bytes, summary = run_with_loading_callback(
+                lambda progress_callback: process_bigseller_price(
                     mass_files, pricelist_file, addon_file, discount_rp, price_key, progress_callback
                 ),
                 "Memproses harga normal Bigseller...",
