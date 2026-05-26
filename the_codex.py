@@ -466,10 +466,28 @@ def append_no_changes_issue(issues: List[Dict[str, Any]], file_name: str):
 
 
 
+def _safe_progress_range(progress_start=None, progress_end=None, default_start: int = 3, default_end: int = 95) -> Tuple[int, int]:
+    """Normalisasi range progress agar tidak error jika ada None/invalid dari caller."""
+    try:
+        start = int(progress_start) if progress_start is not None else int(default_start)
+    except Exception:
+        start = int(default_start)
+    try:
+        end = int(progress_end) if progress_end is not None else int(default_end)
+    except Exception:
+        end = int(default_end)
+    start = max(0, min(100, start))
+    end = max(0, min(100, end))
+    if end < start:
+        end = start
+    return start, end
+
+
 def progress_tick(progress_callback, start_pct: int, end_pct: int, current: int, total: int, message: str):
     """Update progress aman untuk processor besar."""
     if not progress_callback:
         return
+    start_pct, end_pct = _safe_progress_range(start_pct, end_pct, 3, 95)
     total = max(1, int(total or 1))
     current = max(0, min(int(current or 0), total))
     pct = int(start_pct + (end_pct - start_pct) * (current / total))
@@ -895,6 +913,7 @@ def build_area_warehouse_meta(
 
 
 def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str, progress_callback=None, progress_start: int = 4, progress_end: int = 12):
+    progress_start, progress_end = _safe_progress_range(progress_start, progress_end, 4, 12)
     if progress_callback:
         progress_callback(progress_start, f"[{sheet_name}] mencari header KODEBARANG...")
 
@@ -981,6 +1000,7 @@ def build_stock_lookup_from_sheet_fast(ws: Worksheet, sheet_name: str, progress_
 
 
 def build_stock_lookup_from_pricelist_bytes(pl_bytes: bytes, progress_callback=None, progress_start: int = 3, progress_end: int = 12):
+    progress_start, progress_end = _safe_progress_range(progress_start, progress_end, 3, 12)
     if progress_callback:
         progress_callback(progress_start, "Membuka workbook Pricelist stok...")
 
@@ -1671,6 +1691,7 @@ def process_akulaku_stock(mass_files: List[Any], pricelist_file: Any, selected_m
 # PRICE LOADERS
 # ============================================================
 def load_addon_map_generic(addon_bytes: bytes, progress_callback=None, progress_start: int = 8, progress_end: int = 12) -> Dict[str, int]:
+    progress_start, progress_end = _safe_progress_range(progress_start, progress_end, 8, 12)
     if progress_callback:
         progress_callback(progress_start, "Membuka workbook Addon Mapping...")
     wb = load_workbook(io.BytesIO(addon_bytes), data_only=True, read_only=True)
@@ -1742,6 +1763,7 @@ def find_header_row_and_cols_pricelist_fixed(ws: Worksheet, required_price_cols:
 
 
 def load_pricelist_price_map(pl_bytes: bytes, needed_cols: List[str], progress_callback=None, progress_start: int = 3, progress_end: int = 8) -> Dict[str, Dict[str, int]]:
+    progress_start, progress_end = _safe_progress_range(progress_start, progress_end, 3, 8)
     if progress_callback:
         progress_callback(progress_start, "Membuka workbook Pricelist harga...")
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=True)
@@ -1782,7 +1804,8 @@ def load_pricelist_price_map_multisheet(
     progress_callback=None,
     progress_start: int = 3,
     progress_end: int = 8,
-) -> Dict[str, Dict[str, int]]:
+ ) -> Dict[str, Dict[str, int]]:
+    progress_start, progress_end = _safe_progress_range(progress_start, progress_end, 3, 8)
     if progress_callback:
         progress_callback(progress_start, "Membuka workbook Pricelist harga multi-sheet...")
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
