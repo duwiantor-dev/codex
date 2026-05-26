@@ -592,6 +592,10 @@ def cache_downloads(
     else:
         st.session_state.issue_preview_cache[cache_key] = list(st.session_state.get("_last_issue_info", []))
 
+    # Simpan pointer hasil terakhir supaya download/summary tidak hilang saat user pindah menu.
+    st.session_state.last_result_cache_key = cache_key
+    st.session_state.last_result_title = result_name or "Hasil terakhir"
+
 
 def render_issue_preview(cache_key: str):
     items = st.session_state.issue_preview_cache.get(cache_key, [])
@@ -603,6 +607,7 @@ def render_issue_preview(cache_key: str):
 
 
 def render_downloads(cache_key: str):
+    st.session_state.setdefault("_rendered_cache_keys", set()).add(cache_key)
     payload = st.session_state.download_cache.get(cache_key)
     if not payload:
         return
@@ -625,10 +630,33 @@ def render_downloads(cache_key: str):
 
 
 def render_cached_summary(cache_key: str, title: str = "Ringkasan Hasil"):
+    st.session_state.setdefault("_rendered_cache_keys", set()).add(cache_key)
     summary = st.session_state.summary_cache.get(cache_key)
     if summary:
         render_summary(title, summary)
         render_issue_preview(cache_key)
+
+
+def render_last_result_panel():
+    """Tampilkan hasil proses terakhir walaupun user pindah fitur/menu.
+
+    Streamlit selalu rerun dari atas saat radio/sidebar berubah. Tanpa panel global,
+    hasil hanya terlihat di halaman asal karena render_downloads dipanggil di halaman itu saja.
+    """
+    cache_key = st.session_state.get("last_result_cache_key")
+    if not cache_key:
+        return
+    if cache_key in st.session_state.get("_rendered_cache_keys", set()):
+        return
+    if cache_key not in st.session_state.download_cache and cache_key not in st.session_state.summary_cache:
+        return
+
+    st.markdown("---")
+    with st.expander("Hasil Terakhir", expanded=True):
+        title = st.session_state.get("last_result_title") or "Hasil terakhir"
+        st.caption(f"Hasil masih tersimpan selama aplikasi belum direstart: {title}")
+        render_cached_summary(cache_key, title="Ringkasan Hasil Terakhir")
+        render_downloads(cache_key)
 
 
 def get_change_sheet(wb):
@@ -7007,6 +7035,7 @@ def build_menu() -> str:
 
 
 def main():
+    st.session_state["_rendered_cache_keys"] = set()
     route = build_menu()
     if route == "dashboard":
         render_dashboard()
@@ -7056,6 +7085,8 @@ def main():
         render_affiliate_tiktokshop()
     else:
         st.error("Menu tidak dikenal.")
+
+    render_last_result_panel()
 
 
 if __name__ == "__main__":
