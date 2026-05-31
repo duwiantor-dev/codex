@@ -1802,6 +1802,9 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
         return None, f"Harga {price_key} kosong di Pricelist untuk SKU '{base_sku}'"
 
     base_price_int = int(base_price)
+    if base_price_int <= 0:
+        return None, f"Harga {price_key} 0/kosong di Pricelist untuk SKU '{base_sku}'"
+
     has_aff = False
     addon_total = 0
     for addon in addons:
