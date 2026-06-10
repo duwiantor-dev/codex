@@ -2,19 +2,11 @@ import io
 import re
 import zipfile
 import importlib.util
-import json
-import time
-import uuid
-from datetime import datetime
-from urllib import parse as urlparse
-from urllib import request as urlrequest
-from urllib import error as urlerror
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.worksheet.worksheet import Worksheet
@@ -23,7 +15,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "Codexid version.11"
+APP_TITLE = "Codexid version.9"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
@@ -7227,457 +7219,6 @@ def render_analisa_margin():
         height=650,
     )
 
-
-
-# ============================================================
-# CODEX DIRECT EXTENSION: CEK KEYWORD + KPI SELLER CENTER
-# ============================================================
-# Flow v11:
-# Codex -> Chrome Extension langsung lewat window.postMessage
-# Extension -> Google Sheets lewat Apps Script Result Bridge
-# Codex -> baca Google Sheets lewat Apps Script Result Bridge untuk summary
-CODEX_BRIDGE_TIMEOUT = 90
-CODEX_KEYWORD_MODES = ["Terkait", "Terlaris", "Termurah"]
-CODEX_KPI_COLUMNS = [
-    "run_id", "created_at", "periode", "platform", "shop_name", "username_toko",
-    "pesanan", "konversi", "impression", "klik", "respon_chat", "chat_belum_dibalas",
-    "tingkat_konversi_dari_chat", "point_penalty", "rating_keseluruhan", "badge",
-    "return_case", "spaylater_xtra_status", "preorder_sku", "nominasi_ght",
-    "update_stok_status", "update_harga_status", "raw_json",
-]
-CODEX_KEYWORD_COLUMNS = [
-    "tanggal_scan", "keyword", "platform", "rank", "rank_prev", "rank_change",
-    "shop_name", "nama_produk", "price", "price_prev", "price_change", "sold",
-    "rating", "link_produk",
-]
-
-
-def codex_now_iso() -> str:
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-
-def codex_make_run_id(prefix: str) -> str:
-    return f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:5].upper()}"
-
-
-def codex_safe_secret(name: str, default: str = "") -> str:
-    try:
-        val = st.secrets.get(name, default)
-        return str(val or "").strip()
-    except Exception:
-        return default
-
-
-def codex_csv_url(name: str) -> str:
-    try:
-        return str(st.secrets.get(name, "") or "").strip()
-    except Exception:
-        return ""
-
-
-def codex_keyword_csv_url() -> str:
-    return codex_csv_url("CODEX_KEYWORD_CSV_URL") or st.session_state.get("codex_keyword_csv_url", "")
-
-
-def codex_kpi_csv_url() -> str:
-    return codex_csv_url("CODEX_KPI_CSV_URL") or st.session_state.get("codex_kpi_csv_url", "")
-
-
-def codex_result_bridge_configured() -> bool:
-    return bool(codex_keyword_csv_url())
-
-
-def codex_render_result_bridge_notice():
-    if codex_result_bridge_configured():
-        return
-    st.warning("CODEX_KEYWORD_CSV_URL belum diisi. Publish Google Form response sheet sebagai CSV, lalu masukkan URL CSV ke Streamlit Secrets.")
-
-
-def codex_read_csv_url(url: str) -> pd.DataFrame:
-    if not url:
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(url)
-    except Exception as e:
-        raise RuntimeError(f"Gagal baca CSV Google Sheets: {e}")
-
-
-def codex_normalize_form_columns(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty:
-        return pd.DataFrame()
-    out = df.copy()
-    out.columns = [str(c).strip() for c in out.columns]
-    norm = {}
-    for c in out.columns:
-        k = str(c).strip().lower().replace(" ", "_")
-        k = re.sub(r"[^a-z0-9_]+", "_", k).strip("_")
-        norm[c] = k
-    out.rename(columns=norm, inplace=True)
-    # Google Form sering punya timestamp otomatis.
-    if "timestamp" in out.columns and "created_at" not in out.columns:
-        out.rename(columns={"timestamp": "created_at"}, inplace=True)
-    return out
-
-
-def codex_get_keyword_results(run_id: str) -> List[Dict[str, Any]]:
-    df = codex_normalize_form_columns(codex_read_csv_url(codex_keyword_csv_url()))
-    if df.empty:
-        return []
-    if "run_id" not in df.columns:
-        raise RuntimeError("CSV keyword tidak punya kolom run_id. Pastikan judul pertanyaan Google Form memakai nama field yang benar.")
-    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
-    return df.to_dict("records")
-
-
-def codex_get_kpi_results(run_id: str) -> List[Dict[str, Any]]:
-    url = codex_kpi_csv_url() or codex_keyword_csv_url()
-    df = codex_normalize_form_columns(codex_read_csv_url(url))
-    if df.empty or "run_id" not in df.columns:
-        return []
-    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
-    return df.to_dict("records")
-
-
-def codex_get_master_toko() -> List[Dict[str, Any]]:
-    return []
-
-
-def codex_to_number(v) -> Optional[float]:
-    if v is None or v == "":
-        return None
-    if isinstance(v, (int, float)) and not isinstance(v, bool):
-        try:
-            if pd.isna(v):
-                return None
-        except Exception:
-            pass
-        return float(v)
-    txt = s_clean(v).lower()
-    if not txt:
-        return None
-    mult = 1
-    if "jt" in txt or "juta" in txt:
-        mult = 1_000_000
-    elif "rb" in txt or "ribu" in txt:
-        mult = 1_000
-    txt = txt.replace("rp", "").replace("idr", "")
-    txt = re.sub(r"[^0-9,.-]", "", txt)
-    if not txt:
-        return None
-    if "," in txt and "." in txt:
-        txt = txt.replace(".", "").replace(",", ".")
-    elif "." in txt and "," not in txt:
-        if re.fullmatch(r"\d{1,3}(\.\d{3})+", txt):
-            txt = txt.replace(".", "")
-    elif "," in txt and "." not in txt:
-        txt = txt.replace(",", ".")
-    try:
-        return float(txt) * mult
-    except Exception:
-        return None
-
-
-def codex_format_idr(v) -> str:
-    num = codex_to_number(v)
-    if num is None:
-        return "-"
-    return "Rp " + f"{int(round(num)):,}".replace(",", ".")
-
-
-def codex_prepare_keyword_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    if not rows:
-        return pd.DataFrame(columns=["mode"] + CODEX_KEYWORD_COLUMNS)
-    df = pd.DataFrame(rows).copy()
-    rename_map = {
-        "product_name": "nama_produk",
-        "item_name": "nama_produk",
-        "price_num": "price",
-        "mode_label": "mode",
-        "sheet": "mode",
-        "link": "link_produk",
-    }
-    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
-    for col in ["mode"] + CODEX_KEYWORD_COLUMNS + ["product_id", "shop_id", "run_id", "created_at"]:
-        if col not in df.columns:
-            df[col] = ""
-    df["rank_num"] = df["rank"].map(codex_to_number)
-    df["price_num_calc"] = df["price"].map(codex_to_number)
-    df["mode"] = df["mode"].replace("", "Terkait").fillna("Terkait")
-    return df
-
-
-def codex_render_keyword_metric_cards(df: pd.DataFrame):
-    total_produk = int(len(df))
-    avg_rank = df["rank_num"].dropna().mean() if "rank_num" in df else None
-    min_price = df["price_num_calc"].dropna().min() if "price_num_calc" in df and not df["price_num_calc"].dropna().empty else None
-    toko_count = int(df["shop_name"].replace("", pd.NA).dropna().nunique()) if "shop_name" in df else 0
-    top_share = 0.0
-    if total_produk and "shop_name" in df:
-        vc = df["shop_name"].replace("", pd.NA).dropna().value_counts()
-        if not vc.empty:
-            top_share = vc.iloc[0] / total_produk * 100
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total Produk", total_produk)
-    c2.metric("Rata-rata Rank", "-" if pd.isna(avg_rank) else f"{avg_rank:.1f}")
-    c3.metric("Harga Terendah", codex_format_idr(min_price))
-    c4.metric("Toko Dipantau", toko_count, f"{top_share:.2f}% share top" if top_share else None)
-
-
-def codex_keyword_insights(df: pd.DataFrame) -> List[str]:
-    if df.empty:
-        return ["Belum ada data hasil scan."]
-    lines: List[str] = []
-    if "shop_name" in df:
-        vc = df["shop_name"].replace("", pd.NA).dropna().value_counts().head(5)
-        if not vc.empty:
-            total = max(1, len(df))
-            top = vc.index[0]
-            lines.append(f"Toko paling dominan: {top} muncul {int(vc.iloc[0])}x ({vc.iloc[0] / total * 100:.2f}%).")
-            lines.append("Top toko: " + ", ".join([f"{idx} ({int(val)}x)" for idx, val in vc.items()]))
-    if "price_num_calc" in df and not df["price_num_calc"].dropna().empty:
-        lines.append(f"Harga minimum terbaca: {codex_format_idr(df['price_num_calc'].min())}.")
-    if "rank_num" in df and not df["rank_num"].dropna().empty:
-        lines.append(f"Median rank hasil scan: {df['rank_num'].median():.1f}.")
-    return lines[:6]
-
-
-def codex_render_insight_boxes(df: pd.DataFrame):
-    c1, c2 = st.columns(2)
-    with c1:
-        st.subheader("Executive Insight")
-        for line in codex_keyword_insights(df):
-            st.write(f"• {line}")
-    with c2:
-        st.subheader("Heatmap Visibilitas")
-        if df.empty or "rank_num" not in df:
-            st.info("Belum ada data rank.")
-        else:
-            bins = [0, 10, 30, 60, 100, 10_000]
-            labels = ["Rank 1-10", "Rank 11-30", "Rank 31-60", "Rank 61-100", "Rank >100"]
-            cats = pd.cut(df["rank_num"], bins=bins, labels=labels, include_lowest=True)
-            heat = cats.value_counts().reindex(labels).fillna(0).astype(int).reset_index()
-            heat.columns = ["bucket", "jumlah"]
-            st.dataframe(heat, use_container_width=True, hide_index=True, height=210)
-
-
-def codex_render_keyword_table(df: pd.DataFrame, suffix: str):
-    if df.empty:
-        st.info("Belum ada data pada mode ini.")
-        return
-    display_cols = [
-        "mode", "tanggal_scan", "keyword", "rank", "rank_prev", "rank_change",
-        "shop_name", "nama_produk", "price", "price_prev", "price_change",
-        "sold", "rating", "link_produk",
-    ]
-    view = df[[c for c in display_cols if c in df.columns]].copy()
-    st.dataframe(view, use_container_width=True, hide_index=True, height=550)
-    csv_bytes = view.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("Download CSV", csv_bytes, file_name=f"cek_keyword_{suffix}.csv", mime="text/csv", use_container_width=True, key=f"keyword_csv_{suffix}_{uuid.uuid4().hex[:6]}")
-
-
-def codex_render_keyword_results(rows: List[Dict[str, Any]], *, title: str = "Hasil Cek Keyword"):
-    df = codex_prepare_keyword_dataframe(rows)
-    st.subheader(title)
-    if df.empty:
-        st.info("Belum ada hasil. Setelah extension selesai scan dan submit ke Google Form, klik Refresh Hasil.")
-        return
-    codex_render_keyword_metric_cards(df)
-    codex_render_insight_boxes(df)
-    tab_all, tab_terkait, tab_terlaris, tab_termurah = st.tabs(["Gabungan", "Terkait", "Terlaris", "Termurah"])
-    with tab_all:
-        codex_render_keyword_table(df, "gabungan")
-    for tab, mode in [(tab_terkait, "Terkait"), (tab_terlaris, "Terlaris"), (tab_termurah, "Termurah")]:
-        with tab:
-            part = df[df["mode"].str.lower() == mode.lower()].copy()
-            codex_render_keyword_metric_cards(part)
-            codex_render_keyword_table(part, mode.lower())
-
-
-def codex_extension_command_component(command: Dict[str, Any], *, button_label: str, key: str):
-    payload = json.dumps(command, ensure_ascii=False)
-    html = f"""
-    <div style='font-family: sans-serif; border:1px solid #d9e2ec; border-radius:12px; padding:14px; background:#f8fafc;'>
-      <button id='sendBtn' style='width:100%; padding:12px 14px; border:0; border-radius:10px; background:#2563eb; color:white; font-weight:700; cursor:pointer;'>
-        {button_label}
-      </button>
-      <div id='status' style='margin-top:10px; font-size:13px; color:#334155;'>Belum dikirim ke extension.</div>
-    </div>
-    <script>
-      const command = {payload};
-      const status = document.getElementById('status');
-      document.getElementById('sendBtn').addEventListener('click', () => {{
-        window.parent.postMessage({{
-          source: 'codex_streamlit',
-          type: 'CODEX_DIRECT_COMMAND',
-          command
-        }}, '*');
-        status.textContent = 'Command dikirim ke extension. Buka icon extension untuk cek status.';
-      }});
-    </script>
-    """
-    components.html(html, height=105, scrolling=False)
-
-
-def render_cek_keyword_shopee():
-    st.title("Cek Keyword > Shopee")
-    st.caption("Command dikirim langsung ke Chrome Extension. Extension scan Shopee, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV untuk summary.")
-    codex_render_result_bridge_notice()
-
-    with st.form("cek_keyword_shopee_form", clear_on_submit=False):
-        keyword = st.text_input("Keyword", placeholder="contoh: laptop gaming", key="cek_keyword_input")
-        c1, c2 = st.columns(2)
-        max_page = c1.number_input("Max Page", min_value=1, max_value=10, value=1, step=1, key="cek_keyword_max_page")
-        limit_per_mode = c2.number_input("Limit produk per mode", min_value=10, max_value=500, value=150, step=10, key="cek_keyword_limit")
-        modes = st.multiselect("Mode Scan", CODEX_KEYWORD_MODES, default=CODEX_KEYWORD_MODES, key="cek_keyword_modes")
-        submitted = st.form_submit_button("Siapkan Command", use_container_width=True)
-
-    if submitted:
-        if not keyword.strip():
-            st.warning("Keyword wajib diisi.")
-        elif not modes:
-            st.warning("Pilih minimal 1 mode scan.")
-        else:
-            run_id = codex_make_run_id("KW")
-            st.session_state["keyword_last_run_id"] = run_id
-            st.session_state["keyword_last_command"] = {
-                "source": "codex_streamlit",
-                "type": "SCAN_KEYWORD_SHOPEE",
-                "run_id": run_id,
-                "created_at": codex_now_iso(),
-                "platform": "shopee",
-                "keyword": keyword.strip(),
-                "scan_modes": modes,
-                "max_page": int(max_page),
-                "limit_per_mode": int(limit_per_mode),
-            }
-            st.success(f"Command siap: {run_id}")
-
-    command = st.session_state.get("keyword_last_command")
-    if command:
-        codex_extension_command_component(command, button_label="Kirim Command ke Extension", key="send_keyword_command")
-        st.code(command.get("run_id", ""), language="text")
-
-    st.markdown("---")
-    c1, c2 = st.columns([2, 1])
-    run_id = c1.text_input("Run ID hasil", value=st.session_state.get("keyword_last_run_id", ""), key="keyword_result_run_id")
-    refresh = c2.button("Refresh Hasil", use_container_width=True, key="keyword_refresh_btn")
-    if run_id:
-        try:
-            rows = codex_get_keyword_results(run_id)
-            codex_render_keyword_results(rows)
-        except Exception as e:
-            if refresh or run_id:
-                st.error(str(e))
-    else:
-        st.info("Siapkan command atau isi Run ID untuk membaca hasil dari Google Form response CSV.")
-
-
-def render_cek_keyword_tokopedia():
-    st.title("Cek Keyword > Tokopedia")
-    st.info("Menu Tokopedia sudah disiapkan. Logic Tokopedia belum diaktifkan di v11, fokus pertama Shopee dulu.")
-
-
-def codex_prepare_kpi_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    if not rows:
-        return pd.DataFrame(columns=CODEX_KPI_COLUMNS)
-    df = pd.DataFrame(rows).copy()
-    for col in CODEX_KPI_COLUMNS:
-        if col not in df.columns:
-            df[col] = ""
-    return df
-
-
-def codex_render_kpi_summary(df: pd.DataFrame):
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Toko", int(df["username_toko"].replace("", pd.NA).dropna().nunique()) if "username_toko" in df else 0)
-    c2.metric("Periode", int(df["periode"].replace("", pd.NA).dropna().nunique()) if "periode" in df else 0)
-    c3.metric("Baris KPI", len(df))
-    c4.metric("Badge Terbaca", int(df["badge"].replace("", pd.NA).dropna().count()) if "badge" in df else 0)
-
-
-def codex_render_kpi_results(rows: List[Dict[str, Any]]):
-    df = codex_prepare_kpi_dataframe(rows)
-    st.subheader("Hasil KPI Seller Center")
-    if df.empty:
-        st.info("Belum ada hasil KPI untuk Run ID ini.")
-        return
-    codex_render_kpi_summary(df)
-    st.dataframe(df[[c for c in CODEX_KPI_COLUMNS if c in df.columns]], use_container_width=True, hide_index=True, height=520)
-    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("Download CSV KPI", csv_bytes, file_name="kpi_seller_center.csv", mime="text/csv", use_container_width=True, key=f"kpi_csv_{uuid.uuid4().hex[:6]}")
-
-
-def render_kpi_seller_center_shopee():
-    st.title("KPI Seller Center > Shopee")
-    st.caption("Command dikirim langsung ke Chrome Extension. Extension buka Seller Center, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV.")
-    codex_render_result_bridge_notice()
-
-    with st.form("kpi_seller_shopee_form", clear_on_submit=False):
-        scan_mode = st.radio("Mode Scan", ["1 username manual", "Semua username dari sheet"], horizontal=True, key="kpi_scan_mode")
-        username = ""
-        if scan_mode == "1 username manual":
-            username = st.text_input("Username toko", placeholder="contoh: tokoabc", key="kpi_username_manual")
-        periode = st.multiselect(
-            "Periode KPI",
-            ["Hari ini", "Kemarin", "7 Hari", "30 Hari", "Bulanan", "Semua"],
-            default=["Semua"],
-            key="kpi_periods",
-        )
-        submitted = st.form_submit_button("Siapkan Command KPI", use_container_width=True)
-
-    if submitted:
-        if scan_mode == "1 username manual" and not username.strip():
-            st.warning("Username wajib diisi untuk mode manual.")
-        else:
-            run_id = codex_make_run_id("KPI")
-            st.session_state["kpi_last_run_id"] = run_id
-            st.session_state["kpi_last_command"] = {
-                "source": "codex_streamlit",
-                "type": "SCAN_KPI_SELLER_SHOPEE",
-                "run_id": run_id,
-                "created_at": codex_now_iso(),
-                "platform": "shopee",
-                "scan_mode": "manual" if scan_mode == "1 username manual" else "all_from_sheet",
-                "username_toko": username.strip(),
-                "periode": ",".join(periode or ["Semua"]),
-            }
-            st.success(f"Command KPI siap: {run_id}")
-
-    command = st.session_state.get("kpi_last_command")
-    if command:
-        codex_extension_command_component(command, button_label="Kirim Command KPI ke Extension", key="send_kpi_command")
-        st.code(command.get("run_id", ""), language="text")
-
-    st.markdown("---")
-    c1, c2 = st.columns([2, 1])
-    run_id = c1.text_input("Run ID KPI", value=st.session_state.get("kpi_last_run_id", ""), key="kpi_result_run_id")
-    refresh = c2.button("Refresh KPI", use_container_width=True, key="kpi_refresh_btn")
-    if run_id:
-        try:
-            rows = codex_get_kpi_results(run_id)
-            codex_render_kpi_results(rows)
-        except Exception as e:
-            if refresh or run_id:
-                st.error(str(e))
-    else:
-        st.info("Siapkan command atau isi Run ID untuk membaca hasil KPI dari Google Form response CSV.")
-
-    with st.expander("Master toko dari spreadsheet"):
-        if st.button("Load Master Toko", key="load_master_toko_btn"):
-            try:
-                rows = codex_get_master_toko()
-                if rows:
-                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                else:
-                    st.info("Sheet master_toko kosong.")
-            except Exception as e:
-                st.error(str(e))
-
-
-def render_kpi_seller_center_tokopedia():
-    st.title("KPI Seller Center > Tokopedia")
-    st.info("Menu Tokopedia sudah disiapkan. Logic Tokopedia belum diaktifkan di v11, fokus pertama Shopee dulu.")
-
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
     st.session_state["issue_output_mode"] = st.sidebar.radio(
@@ -7690,7 +7231,7 @@ def build_menu() -> str:
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate", "Cek Keyword", "KPI Seller Center"],
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
         key="sidebar_main_menu",
     )
 
@@ -7783,36 +7324,14 @@ def build_menu() -> str:
         else:
             route = "affiliate_tiktokshop"
 
-    elif group == "Cek Keyword":
-        child = st.sidebar.radio(
-            "Pilih Platform",
-            ["Shopee", "Tokopedia"],
-            key="sidebar_cek_keyword_menu",
-        )
-        if child == "Shopee":
-            route = "cek_keyword_shopee"
-        else:
-            route = "cek_keyword_tokopedia"
-
-    elif group == "KPI Seller Center":
-        child = st.sidebar.radio(
-            "Pilih Platform",
-            ["Shopee", "Tokopedia"],
-            key="sidebar_kpi_seller_menu",
-        )
-        if child == "Shopee":
-            route = "kpi_seller_center_shopee"
-        else:
-            route = "kpi_seller_center_tokopedia"
-
     else:
         route = "dashboard"
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("<br><br><br>", unsafe_allow_html=True)
     st.sidebar.link_button(
-        "Download File Extension",
-        codex_safe_secret("CODEX_EXTENSION_DRIVE_URL", "https://drive.google.com/"),
+        "Download File Addon",
+        "https://drive.google.com/drive/u/0/folders/1r3qVqmm1ALfLGaLuvagAf5EQuMVT0iWI",
         use_container_width=True,
     )
 
@@ -7869,14 +7388,6 @@ def main():
         render_analisa_margin()
     elif route in ("affiliate", "affiliate_tiktokshop"):
         render_affiliate_tiktokshop()
-    elif route == "cek_keyword_shopee":
-        render_cek_keyword_shopee()
-    elif route == "cek_keyword_tokopedia":
-        render_cek_keyword_tokopedia()
-    elif route == "kpi_seller_center_shopee":
-        render_kpi_seller_center_shopee()
-    elif route == "kpi_seller_center_tokopedia":
-        render_kpi_seller_center_tokopedia()
     else:
         st.error("Menu tidak dikenal.")
 
