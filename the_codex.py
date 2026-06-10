@@ -7268,82 +7268,78 @@ def codex_safe_secret(name: str, default: str = "") -> str:
         return default
 
 
-def codex_result_bridge_credentials() -> Tuple[str, str]:
-    # Support nama lama supaya tidak perlu rombak secrets kalau sudah terlanjur pakai CODEX_BRIDGE_URL.
-    url = (
-        codex_safe_secret("CODEX_RESULT_BRIDGE_URL", "")
-        or codex_safe_secret("CODEX_BRIDGE_URL", "")
-        or st.session_state.get("codex_result_bridge_url", "")
-    )
-    token = (
-        codex_safe_secret("CODEX_RESULT_BRIDGE_TOKEN", "")
-        or codex_safe_secret("CODEX_BRIDGE_TOKEN", "")
-        or st.session_state.get("codex_result_bridge_token", "")
-    )
-    return s_clean(url), s_clean(token)
+def codex_csv_url(name: str) -> str:
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def codex_keyword_csv_url() -> str:
+    return codex_csv_url("CODEX_KEYWORD_CSV_URL") or st.session_state.get("codex_keyword_csv_url", "")
+
+
+def codex_kpi_csv_url() -> str:
+    return codex_csv_url("CODEX_KPI_CSV_URL") or st.session_state.get("codex_kpi_csv_url", "")
 
 
 def codex_result_bridge_configured() -> bool:
-    url, token = codex_result_bridge_credentials()
-    return bool(url and token)
-
-
-def codex_result_bridge_request(action: str, payload: Optional[Dict[str, Any]] = None, *, method: str = "POST", timeout: int = CODEX_BRIDGE_TIMEOUT) -> Dict[str, Any]:
-    url, token = codex_result_bridge_credentials()
-    if not url:
-        raise RuntimeError("CODEX_RESULT_BRIDGE_URL belum diisi di Streamlit secrets.")
-    if not token:
-        raise RuntimeError("CODEX_RESULT_BRIDGE_TOKEN belum diisi di Streamlit secrets.")
-
-    method = method.upper().strip()
-    payload = dict(payload or {})
-    payload["action"] = action
-    payload["token"] = token
-
-    if method == "GET":
-        query = urlparse.urlencode({k: json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v for k, v in payload.items()})
-        req = urlrequest.Request(url + ("&" if "?" in url else "?") + query, method="GET")
-    else:
-        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urlrequest.Request(url, data=data, method="POST", headers={"Content-Type": "application/json; charset=utf-8"})
-
-    try:
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-    except urlerror.HTTPError as e:
-        raw = e.read().decode("utf-8", errors="replace") if hasattr(e, "read") else str(e)
-        raise RuntimeError(f"Result Bridge HTTP error {e.code}: {raw[:500]}")
-    except Exception as e:
-        raise RuntimeError(f"Gagal konek ke Result Bridge: {e}")
-
-    try:
-        result = json.loads(raw)
-    except Exception:
-        raise RuntimeError(f"Result Bridge mengembalikan response bukan JSON: {raw[:500]}")
-    if not result.get("ok", False):
-        raise RuntimeError(str(result.get("error") or result))
-    return result
+    return bool(codex_keyword_csv_url())
 
 
 def codex_render_result_bridge_notice():
     if codex_result_bridge_configured():
         return
-    st.warning("Result Bridge belum dikonfigurasi. Isi CODEX_RESULT_BRIDGE_URL dan CODEX_RESULT_BRIDGE_TOKEN di Streamlit Secrets agar Codex bisa baca hasil Google Sheets.")
+    st.warning("CODEX_KEYWORD_CSV_URL belum diisi. Publish Google Form response sheet sebagai CSV, lalu masukkan URL CSV ke Streamlit Secrets.")
+
+
+def codex_read_csv_url(url: str) -> pd.DataFrame:
+    if not url:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        raise RuntimeError(f"Gagal baca CSV Google Sheets: {e}")
+
+
+def codex_normalize_form_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    norm = {}
+    for c in out.columns:
+        k = str(c).strip().lower().replace(" ", "_")
+        k = re.sub(r"[^a-z0-9_]+", "_", k).strip("_")
+        norm[c] = k
+    out.rename(columns=norm, inplace=True)
+    # Google Form sering punya timestamp otomatis.
+    if "timestamp" in out.columns and "created_at" not in out.columns:
+        out.rename(columns={"timestamp": "created_at"}, inplace=True)
+    return out
 
 
 def codex_get_keyword_results(run_id: str) -> List[Dict[str, Any]]:
-    res = codex_result_bridge_request("getKeywordResults", {"run_id": run_id}, method="GET")
-    return list(res.get("rows") or [])
+    df = codex_normalize_form_columns(codex_read_csv_url(codex_keyword_csv_url()))
+    if df.empty:
+        return []
+    if "run_id" not in df.columns:
+        raise RuntimeError("CSV keyword tidak punya kolom run_id. Pastikan judul pertanyaan Google Form memakai nama field yang benar.")
+    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
+    return df.to_dict("records")
 
 
 def codex_get_kpi_results(run_id: str) -> List[Dict[str, Any]]:
-    res = codex_result_bridge_request("getKpiResults", {"run_id": run_id}, method="GET")
-    return list(res.get("rows") or [])
+    url = codex_kpi_csv_url() or codex_keyword_csv_url()
+    df = codex_normalize_form_columns(codex_read_csv_url(url))
+    if df.empty or "run_id" not in df.columns:
+        return []
+    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
+    return df.to_dict("records")
 
 
 def codex_get_master_toko() -> List[Dict[str, Any]]:
-    res = codex_result_bridge_request("listMasterToko", {}, method="GET")
-    return list(res.get("rows") or [])
+    return []
 
 
 def codex_to_number(v) -> Optional[float]:
@@ -7483,7 +7479,7 @@ def codex_render_keyword_results(rows: List[Dict[str, Any]], *, title: str = "Ha
     df = codex_prepare_keyword_dataframe(rows)
     st.subheader(title)
     if df.empty:
-        st.info("Belum ada hasil. Setelah extension selesai scan dan mengirim ke Google Sheets, klik Refresh Hasil.")
+        st.info("Belum ada hasil. Setelah extension selesai scan dan submit ke Google Form, klik Refresh Hasil.")
         return
     codex_render_keyword_metric_cards(df)
     codex_render_insight_boxes(df)
@@ -7524,7 +7520,7 @@ def codex_extension_command_component(command: Dict[str, Any], *, button_label: 
 
 def render_cek_keyword_shopee():
     st.title("Cek Keyword > Shopee")
-    st.caption("Command dikirim langsung ke Chrome Extension. Extension scan Shopee, kirim hasil ke Google Sheets, lalu Codex baca hasil untuk summary.")
+    st.caption("Command dikirim langsung ke Chrome Extension. Extension scan Shopee, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV untuk summary.")
     codex_render_result_bridge_notice()
 
     with st.form("cek_keyword_shopee_form", clear_on_submit=False):
@@ -7573,7 +7569,7 @@ def render_cek_keyword_shopee():
             if refresh or run_id:
                 st.error(str(e))
     else:
-        st.info("Siapkan command atau isi Run ID untuk membaca hasil dari Google Sheets.")
+        st.info("Siapkan command atau isi Run ID untuk membaca hasil dari Google Form response CSV.")
 
 
 def render_cek_keyword_tokopedia():
@@ -7613,7 +7609,7 @@ def codex_render_kpi_results(rows: List[Dict[str, Any]]):
 
 def render_kpi_seller_center_shopee():
     st.title("KPI Seller Center > Shopee")
-    st.caption("Command dikirim langsung ke Chrome Extension. Extension buka Seller Center, kirim hasil ke Google Sheets, lalu Codex baca hasil.")
+    st.caption("Command dikirim langsung ke Chrome Extension. Extension buka Seller Center, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV.")
     codex_render_result_bridge_notice()
 
     with st.form("kpi_seller_shopee_form", clear_on_submit=False):
@@ -7664,7 +7660,7 @@ def render_kpi_seller_center_shopee():
             if refresh or run_id:
                 st.error(str(e))
     else:
-        st.info("Siapkan command atau isi Run ID untuk membaca hasil KPI dari Google Sheets.")
+        st.info("Siapkan command atau isi Run ID untuk membaca hasil KPI dari Google Form response CSV.")
 
     with st.expander("Master toko dari spreadsheet"):
         if st.button("Load Master Toko", key="load_master_toko_btn"):
