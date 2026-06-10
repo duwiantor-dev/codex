@@ -2,11 +2,19 @@ import io
 import re
 import zipfile
 import importlib.util
+import json
+import time
+import uuid
+from datetime import datetime
+from urllib import parse as urlparse
+from urllib import request as urlrequest
+from urllib import error as urlerror
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.worksheet.worksheet import Worksheet
@@ -15,7 +23,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 # ============================================================
 # APP CONFIG
 # ============================================================
-APP_TITLE = "Codexid version.9"
+APP_TITLE = "Codexid version.11"
 MAX_MASS_FILES = 50
 MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
@@ -7220,317 +7228,455 @@ def render_analisa_margin():
     )
 
 
+
 # ============================================================
-# ONYX EXTENSION BRIDGE (volatile, no database save)
+# CODEX DIRECT EXTENSION: CEK KEYWORD + KPI SELLER CENTER
 # ============================================================
-def _codex_json_script(command: Dict[str, Any]) -> str:
-    import json as _json
-    return _json.dumps(command, ensure_ascii=False).replace("</", "<\\/")
+# Flow v11:
+# Codex -> Chrome Extension langsung lewat window.postMessage
+# Extension -> Google Sheets lewat Apps Script Result Bridge
+# Codex -> baca Google Sheets lewat Apps Script Result Bridge untuk summary
+CODEX_BRIDGE_TIMEOUT = 90
+CODEX_KEYWORD_MODES = ["Terkait", "Terlaris", "Termurah"]
+CODEX_KPI_COLUMNS = [
+    "run_id", "created_at", "periode", "platform", "shop_name", "username_toko",
+    "pesanan", "konversi", "impression", "klik", "respon_chat", "chat_belum_dibalas",
+    "tingkat_konversi_dari_chat", "point_penalty", "rating_keseluruhan", "badge",
+    "return_case", "spaylater_xtra_status", "preorder_sku", "nominasi_ght",
+    "update_stok_status", "update_harga_status", "raw_json",
+]
+CODEX_KEYWORD_COLUMNS = [
+    "tanggal_scan", "keyword", "platform", "rank", "rank_prev", "rank_change",
+    "shop_name", "nama_produk", "price", "price_prev", "price_change", "sold",
+    "rating", "link_produk",
+]
 
 
-def _build_codex_shopee_url(keyword: str, mode: str) -> str:
-    from urllib.parse import quote_plus as _quote_plus
-    kw = _quote_plus(s_clean(keyword))
-    mode = s_clean(mode).lower()
-    official_filter = "%5B%7B%22group_name%22%3A%22SHOP_TYPE%22%2C%22values%22%3A%5B%22OFFICIAL_MALL%22%5D%7D%2C%7B%22group_name%22%3A%22FACET%22%2C%22values%22%3A%5B%2211044440%22%5D%7D%5D"
-    if mode == "terlaris":
-        return f"https://shopee.co.id/search?fe_filter_options={official_filter}&keyword={kw}&page=0&em_scan=1&sortBy=sales"
-    if mode == "termurah":
-        return f"https://shopee.co.id/search?fe_filter_options={official_filter}&keyword={kw}&order=asc&page=0&em_scan=1&sortBy=price"
-    return f"https://shopee.co.id/search?keyword={kw}&em_scan=1"
+def codex_now_iso() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def render_onyx_bridge_status_panel():
-    st.components.v1.html("""
-    <div id="onyx-root" class="onyx-shell">
-      <div class="onyx-head">
-        <div>
-          <div class="eyebrow">Codex ⇄ Onyx Extension</div>
-          <h3>Tabel Analisa</h3>
-          <div id="live-status" class="hint">Menunggu extension membaca command...</div>
-        </div>
-        <div class="actions">
-          <input id="filter-box" placeholder="Cari keyword / produk / toko..." />
-          <button id="download-csv" type="button">Download CSV</button>
-        </div>
-      </div>
-
-      <div class="metric-grid">
-        <div class="metric blue"><span>Jumlah Produk</span><b id="m-total">0</b><small>latest capture volatile</small></div>
-        <div class="metric purple"><span>Toko Dominan</span><b id="m-shop">-</b><small id="m-shop-note">share of voice</small></div>
-        <div class="metric teal"><span>Harga Minimum</span><b id="m-min">-</b><small>berdasarkan hasil scan</small></div>
-        <div class="metric pink"><span>Capture Masuk</span><b id="m-capture">0</b><small>refresh browser = hilang</small></div>
-      </div>
-
-      <section class="panel main-panel">
-        <div class="panel-title">Hasil Produk Terbaru</div>
-        <div class="table-wrap">
-          <table id="main-table">
-            <thead>
-              <tr>
-                <th class="w-keyword">keyword</th>
-                <th class="w-rank">rank</th>
-                <th class="w-prev">rank_prev</th>
-                <th class="w-change">rank_change</th>
-                <th class="w-shop">shop_name</th>
-                <th class="w-product">product_name</th>
-                <th class="w-price">price_text</th>
-                <th class="w-price">price_prev</th>
-                <th class="w-change">price_change</th>
-                <th class="w-sold">sold_text</th>
-                <th class="w-rating">rating</th>
-                <th class="w-link">link</th>
-              </tr>
-            </thead>
-            <tbody id="main-body"><tr><td colspan="12" class="empty">Belum ada hasil. Klik scan dulu.</td></tr></tbody>
-          </table>
-        </div>
-      </section>
-
-      <div class="bottom-grid">
-        <section class="panel"><div class="panel-title">Share of Voice</div><div id="sov-box"></div></section>
-        <section class="panel"><div class="panel-title">Brand Distribution</div><div id="brand-box"></div></section>
-        <section class="panel"><div class="panel-title">Product Family Distribution</div><div id="family-box"></div></section>
-        <section class="panel"><div class="panel-title">Diagnosis Otomatis</div><div id="diagnosis-box" class="diagnosis">Belum ada diagnosis kuat. Tunggu hasil scan.</div></section>
-      </div>
-    </div>
-
-    <style>
-      :root{color-scheme:dark}
-      .onyx-shell{font-family:Inter,Segoe UI,Arial,sans-serif;background:linear-gradient(180deg,#071326,#08172c);color:#ebf6ff;border:1px solid #173d64;border-radius:18px;padding:18px;box-shadow:0 18px 45px rgba(7,18,37,.28)}
-      .onyx-head{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:16px}
-      .eyebrow{color:#40c3ff;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.09em}
-      h3{margin:3px 0 4px;font-size:22px;color:white;line-height:1.15}
-      .hint{color:#92b6db;font-size:13px}
-      .actions{display:flex;gap:8px;align-items:center;min-width:360px;justify-content:flex-end}
-      .actions input{background:#061122;color:#eff7ff;border:1px solid #21486e;border-radius:10px;padding:10px 12px;width:260px;outline:none}
-      .actions button{background:#0c6fc6;color:#fff;border:1px solid #118dec;border-radius:10px;padding:10px 12px;font-weight:800;cursor:pointer}
-      .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
-      .metric{min-height:82px;border:1px solid #1a4067;border-radius:16px;padding:13px 14px;background:rgba(7,18,37,.94);position:relative;overflow:hidden}
-      .metric:before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:#149aff}
-      .metric.purple:before{background:#8b5cf6}.metric.teal:before{background:#14b8a6}.metric.pink:before{background:#ec4899}
-      .metric span{display:block;color:#88add2;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
-      .metric b{display:block;color:white;font-size:22px;line-height:1.15;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .metric small{display:block;color:#76a0c8;font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      .panel{background:rgba(7,18,37,.94);border:1px solid #1a4067;border-radius:16px;padding:13px;min-height:160px}
-      .main-panel{margin-bottom:14px}
-      .panel-title{color:#bfe1ff;font-size:13px;font-weight:900;margin-bottom:10px;text-transform:uppercase;letter-spacing:.03em}
-      .table-wrap{max-height:438px;overflow:auto;border:1px solid #143657;border-radius:12px;background:#071225}
-      table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
-      thead th{position:sticky;top:0;background:#0d2242;color:#bfe1ff;z-index:2;border-bottom:1px solid #143657;padding:9px 8px;text-align:left;white-space:nowrap}
-      tbody td{border-bottom:1px solid #123457;padding:8px;color:#ebf6ff;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-      tbody tr:nth-child(even){background:rgba(10,26,50,.58)}
-      tbody tr:hover{background:rgba(17,72,117,.55)}
-      .empty{text-align:center;color:#92b6db;padding:38px!important}
-      .w-keyword{width:110px}.w-rank{width:58px}.w-prev{width:78px}.w-change{width:86px}.w-shop{width:185px}.w-product{width:360px}.w-price{width:120px}.w-sold{width:90px}.w-rating{width:76px}.w-link{width:110px}
-      .link-btn{display:inline-block;background:#102b4f;color:#9dd5ff!important;border:1px solid #225180;border-radius:999px;padding:4px 9px;text-decoration:none;font-weight:800;text-align:center}
-      .bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-      .mini-table-wrap{max-height:220px;overflow:auto;border:1px solid #143657;border-radius:10px}
-      .mini-table th,.mini-table td{padding:8px;font-size:12px}
-      .diagnosis{white-space:pre-wrap;color:#d9ecff;line-height:1.45;max-height:220px;overflow:auto}
-      @media(max-width:900px){.onyx-head{display:block}.actions{min-width:0;margin-top:12px;justify-content:flex-start}.actions input{width:100%}.metric-grid{grid-template-columns:1fr 1fr}.bottom-grid{grid-template-columns:1fr}}
-    </style>
-
-    <script>
-    (function(){
-      const state = { results: [], status: 'Menunggu extension membaca command...', filter: '' };
-      const brands = ['Lenovo','Asus','Acer','HP','Dell','MSI','Axioo','Advan','Apple','Samsung','Zyrex'];
-      const families = ['ThinkPad','IdeaPad','Legion','LOQ','Yoga','VivoBook','ZenBook','ROG','TUF','Aspire','Predator','Nitro','Latitude','Inspiron','Pavilion','Omen','Victus','MacBook'];
-      const $ = (id)=>document.getElementById(id);
-      function esc(s){return String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
-      function digits(s){const d=String(s ?? '').replace(/[^0-9]/g,''); return d ? Number(d) : null;}
-      function money(n){return n ? ('Rp '+Math.round(n).toLocaleString('id-ID')) : '-';}
-      function normText(s){return String(s ?? '').replace(/\s+/g,' ').trim();}
-      function pick(obj, keys, fallback=''){for(const k of keys){const v=obj && obj[k]; if(v!==undefined && v!==null && String(v).trim()!=='') return v;} return fallback;}
-      function classify(name, list){const hay=(' '+String(name||'')+' ').toLowerCase(); for(const x of list){const re=new RegExp('(^|[^a-z0-9])'+x.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'([^a-z0-9]|$)'); if(re.test(hay)) return x;} return 'UNKNOWN';}
-      function resultKey(result){const p = result.payload || result || {}; return String(p.scan_id || result.scan_id || p.keyword+'|'+p.mode+'|'+(result.path||''));}
-      function addResult(result){
-        if(!result) return;
-        const key = resultKey(result);
-        const idx = state.results.findIndex(r=>resultKey(r)===key);
-        if(idx>=0) state.results[idx] = result; else state.results.push(result);
-        render();
-      }
-      function normalizeRows(){
-        const out = [];
-        state.results.forEach((res)=>{
-          const p = res.payload || res || {};
-          const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : (Array.isArray(p.shops) ? p.shops : []));
-          items.forEach((x, idx)=>{
-            const product = normText(pick(x, ['product_name','name','title','display_name','raw_title']));
-            const priceText = normText(pick(x, ['price_text','price','last_price']));
-            const priceNum = pick(x, ['price_num','price_number'], null) || digits(priceText);
-            const shop = normText(pick(x, ['shop_name','shop','seller_name','shop_id','shop_username','username'], 'UNKNOWN'));
-            const keyword = normText(pick(x, ['keyword'], p.keyword || ''));
-            const mode = normText(pick(x, ['mode'], p.mode || ''));
-            out.push({
-              keyword, mode,
-              rank: pick(x, ['rank'], idx+1),
-              rank_prev: pick(x, ['rank_prev'], '-'),
-              rank_change: pick(x, ['rank_change'], '-'),
-              shop_name: shop,
-              product_name: product,
-              price_text: priceText,
-              price_num: priceNum,
-              price_prev: pick(x, ['price_prev'], '-'),
-              price_change: pick(x, ['price_change'], '-'),
-              sold_text: normText(pick(x, ['sold_text','sold'], '')),
-              rating: normText(pick(x, ['rating'], '')),
-              link: normText(pick(x, ['link','url','detail_url'], '')),
-              brand: pick(x, ['brand'], classify(product, brands)),
-              family: pick(x, ['family'], classify(product, families))
-            });
-          });
-        });
-        return out;
-      }
-      function countBy(rows, field){
-        const total = Math.max(1, rows.length), m = new Map();
-        rows.forEach(r=>{const k = normText(r[field]) || 'UNKNOWN'; m.set(k, (m.get(k)||0)+1);});
-        return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]).map(([name,count])=>({name,count,share:Math.round(count/total*10000)/100}));
-      }
-      function miniTable(rows, firstCol){
-        if(!rows.length) return '<div class="empty">Belum ada data.</div>';
-        const body = rows.slice(0,30).map(r=>`<tr><td title="${esc(r.name)}">${esc(r.name)}</td><td>${r.count}</td><td>${r.share}%</td></tr>`).join('');
-        return `<div class="mini-table-wrap"><table class="mini-table"><thead><tr><th>${esc(firstCol)}</th><th>count</th><th>share</th></tr></thead><tbody>${body}</tbody></table></div>`;
-      }
-      function csv(rows){
-        const cols = ['keyword','mode','rank','shop_name','product_name','price_text','sold_text','rating','link'];
-        const q = (v)=>'"'+String(v??'').replace(/"/g,'""')+'"';
-        return [cols.join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\n');
-      }
-      function downloadCsv(){
-        const rows = filteredRows(); if(!rows.length) return;
-        const blob = new Blob([csv(rows)], {type:'text/csv;charset=utf-8'});
-        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'codex_cek_kompetitor_volatile.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
-      }
-      function filteredRows(){
-        const rows = normalizeRows();
-        const needle = state.filter.toLowerCase().trim();
-        if(!needle) return rows;
-        return rows.filter(r=>[r.keyword,r.mode,r.shop_name,r.product_name,r.price_text,r.sold_text,r.rating].join(' ').toLowerCase().includes(needle));
-      }
-      function render(){
-        const allRows = normalizeRows();
-        const rows = filteredRows();
-        $('live-status').textContent = state.status || (allRows.length ? `Hasil masuk: ${allRows.length} item` : 'Menunggu extension membaca command...');
-        const sov = countBy(allRows, 'shop_name');
-        const minPrice = allRows.map(r=>Number(r.price_num||0)).filter(n=>n>0).sort((a,b)=>a-b)[0] || null;
-        $('m-total').textContent = String(allRows.length);
-        $('m-shop').textContent = sov[0]?.name || '-';
-        $('m-shop-note').textContent = sov[0] ? `${sov[0].share}% share` : 'share of voice';
-        $('m-min').textContent = money(minPrice);
-        $('m-capture').textContent = String(state.results.length);
-        if(!rows.length){ $('main-body').innerHTML = `<tr><td colspan="12" class="empty">${allRows.length ? 'Tidak ada hasil sesuai filter.' : 'Belum ada hasil. Klik scan dulu.'}</td></tr>`; }
-        else {
-          $('main-body').innerHTML = rows.slice(0,300).map(r=>`<tr>
-            <td title="${esc(r.keyword)}">${esc(r.keyword)}</td>
-            <td>${esc(r.rank)}</td>
-            <td>${esc(r.rank_prev)}</td>
-            <td>${esc(r.rank_change)}</td>
-            <td title="${esc(r.shop_name)}">${esc(r.shop_name)}</td>
-            <td title="${esc(r.product_name)}">${esc(r.product_name)}</td>
-            <td title="${esc(r.price_text)}">${esc(r.price_text)}</td>
-            <td>${esc(r.price_prev)}</td>
-            <td>${esc(r.price_change)}</td>
-            <td title="${esc(r.sold_text)}">${esc(r.sold_text)}</td>
-            <td>${esc(r.rating)}</td>
-            <td>${r.link ? `<a class="link-btn" href="${esc(r.link)}" target="_blank" rel="noopener">Buka Produk</a>` : '-'}</td>
-          </tr>`).join('');
-        }
-        $('sov-box').innerHTML = miniTable(sov, 'shop_name');
-        $('brand-box').innerHTML = miniTable(countBy(allRows, 'brand'), 'brand');
-        $('family-box').innerHTML = miniTable(countBy(allRows, 'family'), 'family');
-        $('diagnosis-box').textContent = allRows.length ? `• Data tampil volatile dari extension, tanpa database.\n• Rank/harga pembanding dibuat kosong karena Codex tidak menyimpan snapshot lama.\n• Toko dominan: ${sov[0]?.name || '-'}${sov[0] ? ' ('+sov[0].share+'%)' : ''}.\n• Harga minimum: ${money(minPrice)}.` : 'Belum ada diagnosis kuat. Jalankan scan dulu.';
-      }
-      window.addEventListener('message', (event)=>{
-        const d = event.data || {};
-        if(!d.__CODEX_ONYX_BRIDGE__) return;
-        if(d.kind === 'status') { state.status = d.message || 'Extension jalan...'; render(); }
-        if(d.kind === 'result') { state.status = 'Hasil diterima dari Onyx Extension.'; addResult(d.result || {}); }
-        if(d.kind === 'state') {
-          if(Array.isArray(d.results)) state.results = d.results;
-          if(d.status) state.status = d.status;
-          render();
-        }
-      });
-      function pollLegacyStorage(){
-        try{
-          const rawMany = sessionStorage.getItem('CODEX_ONYX_RESULTS') || '';
-          const rawLast = sessionStorage.getItem('CODEX_ONYX_LAST_RESULT') || '';
-          const st = sessionStorage.getItem('CODEX_ONYX_STATUS') || '';
-          if(st) state.status = st;
-          if(rawMany){
-            const many = JSON.parse(rawMany);
-            if(Array.isArray(many)) state.results = many;
-          } else if(rawLast) {
-            const one = JSON.parse(rawLast);
-            if(one) state.results = [one];
-          }
-          render();
-        }catch(_){}
-      }
-      setInterval(pollLegacyStorage, 1000);
-      setTimeout(pollLegacyStorage, 300);
-      $('filter-box').addEventListener('input', e=>{state.filter = e.target.value || ''; render();});
-      $('download-csv').addEventListener('click', downloadCsv);
-      render();
-    })();
-    </script>
-    """, height=980)
+def codex_make_run_id(prefix: str) -> str:
+    return f"{prefix}-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:5].upper()}"
 
 
-def render_cek_kompetitor():
-    st.title("Cek Kompetitor")
-    st.caption("Pakai mata/tangan Onyx Extension. Codex hanya kirim command dan tampilin hasil volatile; refresh = hilang.")
-    mode = st.radio("Mode Shopee", ["terkait", "terlaris", "termurah"], horizontal=True, key="codex_comp_mode")
-    raw_keywords = st.text_area("Keyword", value="", placeholder="1 baris = 1 keyword", height=140, key="codex_comp_keywords")
-    keywords = [x.strip() for x in raw_keywords.splitlines() if x.strip()]
-    if st.button("Kirim ke Onyx Extension", type="primary", key="codex_comp_send"):
-        import time as _time
-        scans = []
-        batch_id = f"codex-{mode}-{int(_time.time()*1000)}"
-        for idx, kw in enumerate(keywords, start=1):
-            scans.append({
-                "keyword": kw,
-                "mode": mode,
-                "url": _build_codex_shopee_url(kw, mode),
-                "scan_id": f"{batch_id}-{idx}",
-                "index": idx,
-                "auto_close": True,
-                "source": "codex_streamlit_dom_bridge",
-            })
-        if not scans:
-            st.warning("Isi keyword dulu.")
+def codex_safe_secret(name: str, default: str = "") -> str:
+    try:
+        val = st.secrets.get(name, default)
+        return str(val or "").strip()
+    except Exception:
+        return default
+
+
+def codex_csv_url(name: str) -> str:
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:
+        return ""
+
+
+def codex_keyword_csv_url() -> str:
+    return codex_csv_url("CODEX_KEYWORD_CSV_URL") or st.session_state.get("codex_keyword_csv_url", "")
+
+
+def codex_kpi_csv_url() -> str:
+    return codex_csv_url("CODEX_KPI_CSV_URL") or st.session_state.get("codex_kpi_csv_url", "")
+
+
+def codex_result_bridge_configured() -> bool:
+    return bool(codex_keyword_csv_url())
+
+
+def codex_render_result_bridge_notice():
+    if codex_result_bridge_configured():
+        return
+    st.warning("CODEX_KEYWORD_CSV_URL belum diisi. Publish Google Form response sheet sebagai CSV, lalu masukkan URL CSV ke Streamlit Secrets.")
+
+
+def codex_read_csv_url(url: str) -> pd.DataFrame:
+    if not url:
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(url)
+    except Exception as e:
+        raise RuntimeError(f"Gagal baca CSV Google Sheets: {e}")
+
+
+def codex_normalize_form_columns(df: pd.DataFrame) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out.columns = [str(c).strip() for c in out.columns]
+    norm = {}
+    for c in out.columns:
+        k = str(c).strip().lower().replace(" ", "_")
+        k = re.sub(r"[^a-z0-9_]+", "_", k).strip("_")
+        norm[c] = k
+    out.rename(columns=norm, inplace=True)
+    # Google Form sering punya timestamp otomatis.
+    if "timestamp" in out.columns and "created_at" not in out.columns:
+        out.rename(columns={"timestamp": "created_at"}, inplace=True)
+    return out
+
+
+def codex_get_keyword_results(run_id: str) -> List[Dict[str, Any]]:
+    df = codex_normalize_form_columns(codex_read_csv_url(codex_keyword_csv_url()))
+    if df.empty:
+        return []
+    if "run_id" not in df.columns:
+        raise RuntimeError("CSV keyword tidak punya kolom run_id. Pastikan judul pertanyaan Google Form memakai nama field yang benar.")
+    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
+    return df.to_dict("records")
+
+
+def codex_get_kpi_results(run_id: str) -> List[Dict[str, Any]]:
+    url = codex_kpi_csv_url() or codex_keyword_csv_url()
+    df = codex_normalize_form_columns(codex_read_csv_url(url))
+    if df.empty or "run_id" not in df.columns:
+        return []
+    df = df[df["run_id"].astype(str).str.strip() == str(run_id).strip()].copy()
+    return df.to_dict("records")
+
+
+def codex_get_master_toko() -> List[Dict[str, Any]]:
+    return []
+
+
+def codex_to_number(v) -> Optional[float]:
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            if pd.isna(v):
+                return None
+        except Exception:
+            pass
+        return float(v)
+    txt = s_clean(v).lower()
+    if not txt:
+        return None
+    mult = 1
+    if "jt" in txt or "juta" in txt:
+        mult = 1_000_000
+    elif "rb" in txt or "ribu" in txt:
+        mult = 1_000
+    txt = txt.replace("rp", "").replace("idr", "")
+    txt = re.sub(r"[^0-9,.-]", "", txt)
+    if not txt:
+        return None
+    if "," in txt and "." in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    elif "." in txt and "," not in txt:
+        if re.fullmatch(r"\d{1,3}(\.\d{3})+", txt):
+            txt = txt.replace(".", "")
+    elif "," in txt and "." not in txt:
+        txt = txt.replace(",", ".")
+    try:
+        return float(txt) * mult
+    except Exception:
+        return None
+
+
+def codex_format_idr(v) -> str:
+    num = codex_to_number(v)
+    if num is None:
+        return "-"
+    return "Rp " + f"{int(round(num)):,}".replace(",", ".")
+
+
+def codex_prepare_keyword_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=["mode"] + CODEX_KEYWORD_COLUMNS)
+    df = pd.DataFrame(rows).copy()
+    rename_map = {
+        "product_name": "nama_produk",
+        "item_name": "nama_produk",
+        "price_num": "price",
+        "mode_label": "mode",
+        "sheet": "mode",
+        "link": "link_produk",
+    }
+    df.rename(columns={k: v for k, v in rename_map.items() if k in df.columns}, inplace=True)
+    for col in ["mode"] + CODEX_KEYWORD_COLUMNS + ["product_id", "shop_id", "run_id", "created_at"]:
+        if col not in df.columns:
+            df[col] = ""
+    df["rank_num"] = df["rank"].map(codex_to_number)
+    df["price_num_calc"] = df["price"].map(codex_to_number)
+    df["mode"] = df["mode"].replace("", "Terkait").fillna("Terkait")
+    return df
+
+
+def codex_render_keyword_metric_cards(df: pd.DataFrame):
+    total_produk = int(len(df))
+    avg_rank = df["rank_num"].dropna().mean() if "rank_num" in df else None
+    min_price = df["price_num_calc"].dropna().min() if "price_num_calc" in df and not df["price_num_calc"].dropna().empty else None
+    toko_count = int(df["shop_name"].replace("", pd.NA).dropna().nunique()) if "shop_name" in df else 0
+    top_share = 0.0
+    if total_produk and "shop_name" in df:
+        vc = df["shop_name"].replace("", pd.NA).dropna().value_counts()
+        if not vc.empty:
+            top_share = vc.iloc[0] / total_produk * 100
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total Produk", total_produk)
+    c2.metric("Rata-rata Rank", "-" if pd.isna(avg_rank) else f"{avg_rank:.1f}")
+    c3.metric("Harga Terendah", codex_format_idr(min_price))
+    c4.metric("Toko Dipantau", toko_count, f"{top_share:.2f}% share top" if top_share else None)
+
+
+def codex_keyword_insights(df: pd.DataFrame) -> List[str]:
+    if df.empty:
+        return ["Belum ada data hasil scan."]
+    lines: List[str] = []
+    if "shop_name" in df:
+        vc = df["shop_name"].replace("", pd.NA).dropna().value_counts().head(5)
+        if not vc.empty:
+            total = max(1, len(df))
+            top = vc.index[0]
+            lines.append(f"Toko paling dominan: {top} muncul {int(vc.iloc[0])}x ({vc.iloc[0] / total * 100:.2f}%).")
+            lines.append("Top toko: " + ", ".join([f"{idx} ({int(val)}x)" for idx, val in vc.items()]))
+    if "price_num_calc" in df and not df["price_num_calc"].dropna().empty:
+        lines.append(f"Harga minimum terbaca: {codex_format_idr(df['price_num_calc'].min())}.")
+    if "rank_num" in df and not df["rank_num"].dropna().empty:
+        lines.append(f"Median rank hasil scan: {df['rank_num'].median():.1f}.")
+    return lines[:6]
+
+
+def codex_render_insight_boxes(df: pd.DataFrame):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.subheader("Executive Insight")
+        for line in codex_keyword_insights(df):
+            st.write(f"• {line}")
+    with c2:
+        st.subheader("Heatmap Visibilitas")
+        if df.empty or "rank_num" not in df:
+            st.info("Belum ada data rank.")
         else:
-            command = {"type": "scan_shopee", "mode": mode, "batch_id": batch_id, "scans": scans, "created_by": "codex"}
-            st.success(f"Command siap dibaca extension: {len(scans)} keyword.")
-            st.components.v1.html(f"""
-            <script id="CODEX_EXTENSION_COMMAND" type="application/json">{_codex_json_script(command)}</script>
-            <div style="padding:10px;border:1px solid #d7dde8;border-radius:10px;background:#f8fafc">
-              <b>CODEX_EXTENSION_COMMAND</b><br/>Extension akan mengambil command ini dari DOM Codex.
-            </div>
-            <script>sessionStorage.removeItem('CODEX_ONYX_LAST_RESULT');</script>
-            """, height=90)
-    render_onyx_bridge_status_panel()
+            bins = [0, 10, 30, 60, 100, 10_000]
+            labels = ["Rank 1-10", "Rank 11-30", "Rank 31-60", "Rank 61-100", "Rank >100"]
+            cats = pd.cut(df["rank_num"], bins=bins, labels=labels, include_lowest=True)
+            heat = cats.value_counts().reindex(labels).fillna(0).astype(int).reset_index()
+            heat.columns = ["bucket", "jumlah"]
+            st.dataframe(heat, use_container_width=True, hide_index=True, height=210)
 
 
-def render_cek_seller_center():
-    st.title("Cek Seller Center")
-    st.caption("Pakai flow KPI/Seller Center Onyx Extension. Hasil volatile di browser, tidak masuk database Codex.")
-    period = st.selectbox("Period", ["default", "today", "yesterday", "7d", "30d"], index=0, key="codex_seller_period")
-    action = st.radio("Aksi", ["scan_kpi_shops", "run_kpi"], horizontal=True, key="codex_seller_action")
-    if st.button("Kirim ke Onyx Extension", type="primary", key="codex_seller_send"):
-        command = {"type": action, "period": period, "created_by": "codex", "shop_config": {"mode": "all"}}
-        st.success("Command Seller Center siap dibaca extension.")
-        st.components.v1.html(f"""
-        <script id="CODEX_EXTENSION_COMMAND" type="application/json">{_codex_json_script(command)}</script>
-        <div style="padding:10px;border:1px solid #d7dde8;border-radius:10px;background:#f8fafc">
-          <b>CODEX_EXTENSION_COMMAND</b><br/>Extension akan jalankan Seller Center memakai content/background Onyx.
-        </div>
-        <script>sessionStorage.removeItem('CODEX_ONYX_LAST_RESULT');</script>
-        """, height=90)
-    render_onyx_bridge_status_panel()
+def codex_render_keyword_table(df: pd.DataFrame, suffix: str):
+    if df.empty:
+        st.info("Belum ada data pada mode ini.")
+        return
+    display_cols = [
+        "mode", "tanggal_scan", "keyword", "rank", "rank_prev", "rank_change",
+        "shop_name", "nama_produk", "price", "price_prev", "price_change",
+        "sold", "rating", "link_produk",
+    ]
+    view = df[[c for c in display_cols if c in df.columns]].copy()
+    st.dataframe(view, use_container_width=True, hide_index=True, height=550)
+    csv_bytes = view.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("Download CSV", csv_bytes, file_name=f"cek_keyword_{suffix}.csv", mime="text/csv", use_container_width=True, key=f"keyword_csv_{suffix}_{uuid.uuid4().hex[:6]}")
+
+
+def codex_render_keyword_results(rows: List[Dict[str, Any]], *, title: str = "Hasil Cek Keyword"):
+    df = codex_prepare_keyword_dataframe(rows)
+    st.subheader(title)
+    if df.empty:
+        st.info("Belum ada hasil. Setelah extension selesai scan dan submit ke Google Form, klik Refresh Hasil.")
+        return
+    codex_render_keyword_metric_cards(df)
+    codex_render_insight_boxes(df)
+    tab_all, tab_terkait, tab_terlaris, tab_termurah = st.tabs(["Gabungan", "Terkait", "Terlaris", "Termurah"])
+    with tab_all:
+        codex_render_keyword_table(df, "gabungan")
+    for tab, mode in [(tab_terkait, "Terkait"), (tab_terlaris, "Terlaris"), (tab_termurah, "Termurah")]:
+        with tab:
+            part = df[df["mode"].str.lower() == mode.lower()].copy()
+            codex_render_keyword_metric_cards(part)
+            codex_render_keyword_table(part, mode.lower())
+
+
+def codex_extension_command_component(command: Dict[str, Any], *, button_label: str, key: str):
+    payload = json.dumps(command, ensure_ascii=False)
+    html = f"""
+    <div style='font-family: sans-serif; border:1px solid #d9e2ec; border-radius:12px; padding:14px; background:#f8fafc;'>
+      <button id='sendBtn' style='width:100%; padding:12px 14px; border:0; border-radius:10px; background:#2563eb; color:white; font-weight:700; cursor:pointer;'>
+        {button_label}
+      </button>
+      <div id='status' style='margin-top:10px; font-size:13px; color:#334155;'>Belum dikirim ke extension.</div>
+    </div>
+    <script>
+      const command = {payload};
+      const status = document.getElementById('status');
+      document.getElementById('sendBtn').addEventListener('click', () => {{
+        window.parent.postMessage({{
+          source: 'codex_streamlit',
+          type: 'CODEX_DIRECT_COMMAND',
+          command
+        }}, '*');
+        status.textContent = 'Command dikirim ke extension. Buka icon extension untuk cek status.';
+      }});
+    </script>
+    """
+    components.html(html, height=105, scrolling=False)
+
+
+def render_cek_keyword_shopee():
+    st.title("Cek Keyword > Shopee")
+    st.caption("Command dikirim langsung ke Chrome Extension. Extension scan Shopee, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV untuk summary.")
+    codex_render_result_bridge_notice()
+
+    with st.form("cek_keyword_shopee_form", clear_on_submit=False):
+        keyword = st.text_input("Keyword", placeholder="contoh: laptop gaming", key="cek_keyword_input")
+        c1, c2 = st.columns(2)
+        max_page = c1.number_input("Max Page", min_value=1, max_value=10, value=1, step=1, key="cek_keyword_max_page")
+        limit_per_mode = c2.number_input("Limit produk per mode", min_value=10, max_value=500, value=150, step=10, key="cek_keyword_limit")
+        modes = st.multiselect("Mode Scan", CODEX_KEYWORD_MODES, default=CODEX_KEYWORD_MODES, key="cek_keyword_modes")
+        submitted = st.form_submit_button("Siapkan Command", use_container_width=True)
+
+    if submitted:
+        if not keyword.strip():
+            st.warning("Keyword wajib diisi.")
+        elif not modes:
+            st.warning("Pilih minimal 1 mode scan.")
+        else:
+            run_id = codex_make_run_id("KW")
+            st.session_state["keyword_last_run_id"] = run_id
+            st.session_state["keyword_last_command"] = {
+                "source": "codex_streamlit",
+                "type": "SCAN_KEYWORD_SHOPEE",
+                "run_id": run_id,
+                "created_at": codex_now_iso(),
+                "platform": "shopee",
+                "keyword": keyword.strip(),
+                "scan_modes": modes,
+                "max_page": int(max_page),
+                "limit_per_mode": int(limit_per_mode),
+            }
+            st.success(f"Command siap: {run_id}")
+
+    command = st.session_state.get("keyword_last_command")
+    if command:
+        codex_extension_command_component(command, button_label="Kirim Command ke Extension", key="send_keyword_command")
+        st.code(command.get("run_id", ""), language="text")
+
+    st.markdown("---")
+    c1, c2 = st.columns([2, 1])
+    run_id = c1.text_input("Run ID hasil", value=st.session_state.get("keyword_last_run_id", ""), key="keyword_result_run_id")
+    refresh = c2.button("Refresh Hasil", use_container_width=True, key="keyword_refresh_btn")
+    if run_id:
+        try:
+            rows = codex_get_keyword_results(run_id)
+            codex_render_keyword_results(rows)
+        except Exception as e:
+            if refresh or run_id:
+                st.error(str(e))
+    else:
+        st.info("Siapkan command atau isi Run ID untuk membaca hasil dari Google Form response CSV.")
+
+
+def render_cek_keyword_tokopedia():
+    st.title("Cek Keyword > Tokopedia")
+    st.info("Menu Tokopedia sudah disiapkan. Logic Tokopedia belum diaktifkan di v11, fokus pertama Shopee dulu.")
+
+
+def codex_prepare_kpi_dataframe(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=CODEX_KPI_COLUMNS)
+    df = pd.DataFrame(rows).copy()
+    for col in CODEX_KPI_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    return df
+
+
+def codex_render_kpi_summary(df: pd.DataFrame):
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Toko", int(df["username_toko"].replace("", pd.NA).dropna().nunique()) if "username_toko" in df else 0)
+    c2.metric("Periode", int(df["periode"].replace("", pd.NA).dropna().nunique()) if "periode" in df else 0)
+    c3.metric("Baris KPI", len(df))
+    c4.metric("Badge Terbaca", int(df["badge"].replace("", pd.NA).dropna().count()) if "badge" in df else 0)
+
+
+def codex_render_kpi_results(rows: List[Dict[str, Any]]):
+    df = codex_prepare_kpi_dataframe(rows)
+    st.subheader("Hasil KPI Seller Center")
+    if df.empty:
+        st.info("Belum ada hasil KPI untuk Run ID ini.")
+        return
+    codex_render_kpi_summary(df)
+    st.dataframe(df[[c for c in CODEX_KPI_COLUMNS if c in df.columns]], use_container_width=True, hide_index=True, height=520)
+    csv_bytes = df.to_csv(index=False).encode("utf-8-sig")
+    st.download_button("Download CSV KPI", csv_bytes, file_name="kpi_seller_center.csv", mime="text/csv", use_container_width=True, key=f"kpi_csv_{uuid.uuid4().hex[:6]}")
+
+
+def render_kpi_seller_center_shopee():
+    st.title("KPI Seller Center > Shopee")
+    st.caption("Command dikirim langsung ke Chrome Extension. Extension buka Seller Center, submit hasil ke Google Form, lalu Codex baca response Sheet via CSV.")
+    codex_render_result_bridge_notice()
+
+    with st.form("kpi_seller_shopee_form", clear_on_submit=False):
+        scan_mode = st.radio("Mode Scan", ["1 username manual", "Semua username dari sheet"], horizontal=True, key="kpi_scan_mode")
+        username = ""
+        if scan_mode == "1 username manual":
+            username = st.text_input("Username toko", placeholder="contoh: tokoabc", key="kpi_username_manual")
+        periode = st.multiselect(
+            "Periode KPI",
+            ["Hari ini", "Kemarin", "7 Hari", "30 Hari", "Bulanan", "Semua"],
+            default=["Semua"],
+            key="kpi_periods",
+        )
+        submitted = st.form_submit_button("Siapkan Command KPI", use_container_width=True)
+
+    if submitted:
+        if scan_mode == "1 username manual" and not username.strip():
+            st.warning("Username wajib diisi untuk mode manual.")
+        else:
+            run_id = codex_make_run_id("KPI")
+            st.session_state["kpi_last_run_id"] = run_id
+            st.session_state["kpi_last_command"] = {
+                "source": "codex_streamlit",
+                "type": "SCAN_KPI_SELLER_SHOPEE",
+                "run_id": run_id,
+                "created_at": codex_now_iso(),
+                "platform": "shopee",
+                "scan_mode": "manual" if scan_mode == "1 username manual" else "all_from_sheet",
+                "username_toko": username.strip(),
+                "periode": ",".join(periode or ["Semua"]),
+            }
+            st.success(f"Command KPI siap: {run_id}")
+
+    command = st.session_state.get("kpi_last_command")
+    if command:
+        codex_extension_command_component(command, button_label="Kirim Command KPI ke Extension", key="send_kpi_command")
+        st.code(command.get("run_id", ""), language="text")
+
+    st.markdown("---")
+    c1, c2 = st.columns([2, 1])
+    run_id = c1.text_input("Run ID KPI", value=st.session_state.get("kpi_last_run_id", ""), key="kpi_result_run_id")
+    refresh = c2.button("Refresh KPI", use_container_width=True, key="kpi_refresh_btn")
+    if run_id:
+        try:
+            rows = codex_get_kpi_results(run_id)
+            codex_render_kpi_results(rows)
+        except Exception as e:
+            if refresh or run_id:
+                st.error(str(e))
+    else:
+        st.info("Siapkan command atau isi Run ID untuk membaca hasil KPI dari Google Form response CSV.")
+
+    with st.expander("Master toko dari spreadsheet"):
+        if st.button("Load Master Toko", key="load_master_toko_btn"):
+            try:
+                rows = codex_get_master_toko()
+                if rows:
+                    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("Sheet master_toko kosong.")
+            except Exception as e:
+                st.error(str(e))
+
+
+def render_kpi_seller_center_tokopedia():
+    st.title("KPI Seller Center > Tokopedia")
+    st.info("Menu Tokopedia sudah disiapkan. Logic Tokopedia belum diaktifkan di v11, fokus pertama Shopee dulu.")
 
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
@@ -7544,7 +7690,7 @@ def build_menu() -> str:
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate", "Cek Kompetitor", "Cek Seller Center"],
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate", "Cek Keyword", "KPI Seller Center"],
         key="sidebar_main_menu",
     )
 
@@ -7637,11 +7783,27 @@ def build_menu() -> str:
         else:
             route = "affiliate_tiktokshop"
 
-    elif group == "Cek Kompetitor":
-        route = "cek_kompetitor"
+    elif group == "Cek Keyword":
+        child = st.sidebar.radio(
+            "Pilih Platform",
+            ["Shopee", "Tokopedia"],
+            key="sidebar_cek_keyword_menu",
+        )
+        if child == "Shopee":
+            route = "cek_keyword_shopee"
+        else:
+            route = "cek_keyword_tokopedia"
 
-    elif group == "Cek Seller Center":
-        route = "cek_seller_center"
+    elif group == "KPI Seller Center":
+        child = st.sidebar.radio(
+            "Pilih Platform",
+            ["Shopee", "Tokopedia"],
+            key="sidebar_kpi_seller_menu",
+        )
+        if child == "Shopee":
+            route = "kpi_seller_center_shopee"
+        else:
+            route = "kpi_seller_center_tokopedia"
 
     else:
         route = "dashboard"
@@ -7649,8 +7811,8 @@ def build_menu() -> str:
     st.sidebar.markdown("---")
     st.sidebar.markdown("<br><br><br>", unsafe_allow_html=True)
     st.sidebar.link_button(
-        "Download File Addon",
-        "https://drive.google.com/drive/u/0/folders/1r3qVqmm1ALfLGaLuvagAf5EQuMVT0iWI",
+        "Download File Extension",
+        codex_safe_secret("CODEX_EXTENSION_DRIVE_URL", "https://drive.google.com/"),
         use_container_width=True,
     )
 
@@ -7707,10 +7869,14 @@ def main():
         render_analisa_margin()
     elif route in ("affiliate", "affiliate_tiktokshop"):
         render_affiliate_tiktokshop()
-    elif route == "cek_kompetitor":
-        render_cek_kompetitor()
-    elif route == "cek_seller_center":
-        render_cek_seller_center()
+    elif route == "cek_keyword_shopee":
+        render_cek_keyword_shopee()
+    elif route == "cek_keyword_tokopedia":
+        render_cek_keyword_tokopedia()
+    elif route == "kpi_seller_center_shopee":
+        render_kpi_seller_center_shopee()
+    elif route == "kpi_seller_center_tokopedia":
+        render_kpi_seller_center_tokopedia()
     else:
         st.error("Menu tidak dikenal.")
 
