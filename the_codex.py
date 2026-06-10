@@ -7219,6 +7219,112 @@ def render_analisa_margin():
         height=650,
     )
 
+
+# ============================================================
+# ONYX EXTENSION BRIDGE (volatile, no database save)
+# ============================================================
+def _codex_json_script(command: Dict[str, Any]) -> str:
+    import json as _json
+    return _json.dumps(command, ensure_ascii=False).replace("</", "<\\/")
+
+
+def _build_codex_shopee_url(keyword: str, mode: str) -> str:
+    from urllib.parse import quote_plus as _quote_plus
+    kw = _quote_plus(s_clean(keyword))
+    mode = s_clean(mode).lower()
+    official_filter = "%5B%7B%22group_name%22%3A%22SHOP_TYPE%22%2C%22values%22%3A%5B%22OFFICIAL_MALL%22%5D%7D%2C%7B%22group_name%22%3A%22FACET%22%2C%22values%22%3A%5B%2211044440%22%5D%7D%5D"
+    if mode == "terlaris":
+        return f"https://shopee.co.id/search?fe_filter_options={official_filter}&keyword={kw}&page=0&em_scan=1&sortBy=sales"
+    if mode == "termurah":
+        return f"https://shopee.co.id/search?fe_filter_options={official_filter}&keyword={kw}&order=asc&page=0&em_scan=1&sortBy=price"
+    return f"https://shopee.co.id/search?keyword={kw}&em_scan=1"
+
+
+def render_onyx_bridge_status_panel():
+    st.components.v1.html("""
+    <div id="codex-onyx-live-panel" style="font-family:Inter,Arial,sans-serif;border:1px solid #d7dde8;border-radius:12px;padding:12px;background:#fff">
+      <b>Codex ⇄ Onyx Extension</b>
+      <div id="codex-onyx-live-status" style="margin-top:6px;color:#667085">Menunggu extension membaca command...</div>
+      <div id="codex-onyx-live-result" style="margin-top:10px"></div>
+    </div>
+    <script>
+    const root = document.getElementById('codex-onyx-live-panel');
+    function renderFromStorage(){
+      const status = document.getElementById('codex-onyx-live-status');
+      const box = document.getElementById('codex-onyx-live-result');
+      let raw = sessionStorage.getItem('CODEX_ONYX_LAST_RESULT') || '';
+      if(!raw){ return; }
+      try{
+        const data = JSON.parse(raw);
+        const p = data.payload || data;
+        const items = p.items || p.products || [];
+        status.textContent = `Hasil masuk: ${items.length || 0} item (${p.keyword || p.mode || data.path || 'capture'})`;
+        if(items.length){
+          const rows = items.slice(0,80).map((x,i)=>`<tr><td>${x.rank || i+1}</td><td>${escapeHtml(x.name || x.title || '')}</td><td>${escapeHtml(x.price || x.price_text || '')}</td><td>${escapeHtml(x.sold || x.sold_text || '')}</td><td>${escapeHtml(x.shop_name || x.shop || x.shop_id || '')}</td></tr>`).join('');
+          box.innerHTML = `<div style="max-height:520px;overflow:auto"><table style="border-collapse:collapse;width:100%;font-size:13px"><thead><tr><th>Rank</th><th>Produk</th><th>Harga</th><th>Terjual</th><th>Toko</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+        } else {
+          box.innerHTML = `<pre style="white-space:pre-wrap;max-height:360px;overflow:auto">${escapeHtml(JSON.stringify(p,null,2))}</pre>`;
+        }
+      }catch(e){ status.textContent = 'Ada hasil, tapi gagal render: '+e; }
+    }
+    function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+    setInterval(renderFromStorage, 800); renderFromStorage();
+    </script>
+    """, height=650)
+
+
+def render_cek_kompetitor():
+    st.title("Cek Kompetitor")
+    st.caption("Pakai mata/tangan Onyx Extension. Codex hanya kirim command dan tampilin hasil volatile; refresh = hilang.")
+    mode = st.radio("Mode Shopee", ["terkait", "terlaris", "termurah"], horizontal=True, key="codex_comp_mode")
+    raw_keywords = st.text_area("Keyword", value="", placeholder="1 baris = 1 keyword", height=140, key="codex_comp_keywords")
+    keywords = [x.strip() for x in raw_keywords.splitlines() if x.strip()]
+    if st.button("Kirim ke Onyx Extension", type="primary", key="codex_comp_send"):
+        import time as _time
+        scans = []
+        batch_id = f"codex-{mode}-{int(_time.time()*1000)}"
+        for idx, kw in enumerate(keywords, start=1):
+            scans.append({
+                "keyword": kw,
+                "mode": mode,
+                "url": _build_codex_shopee_url(kw, mode),
+                "scan_id": f"{batch_id}-{idx}",
+                "index": idx,
+                "auto_close": True,
+                "source": "codex_streamlit_dom_bridge",
+            })
+        if not scans:
+            st.warning("Isi keyword dulu.")
+        else:
+            command = {"type": "scan_shopee", "mode": mode, "scans": scans, "created_by": "codex"}
+            st.success(f"Command siap dibaca extension: {len(scans)} keyword.")
+            st.components.v1.html(f"""
+            <script id="CODEX_EXTENSION_COMMAND" type="application/json">{_codex_json_script(command)}</script>
+            <div style="padding:10px;border:1px solid #d7dde8;border-radius:10px;background:#f8fafc">
+              <b>CODEX_EXTENSION_COMMAND</b><br/>Extension akan mengambil command ini dari DOM Codex.
+            </div>
+            <script>sessionStorage.removeItem('CODEX_ONYX_LAST_RESULT');</script>
+            """, height=90)
+    render_onyx_bridge_status_panel()
+
+
+def render_cek_seller_center():
+    st.title("Cek Seller Center")
+    st.caption("Pakai flow KPI/Seller Center Onyx Extension. Hasil volatile di browser, tidak masuk database Codex.")
+    period = st.selectbox("Period", ["default", "today", "yesterday", "7d", "30d"], index=0, key="codex_seller_period")
+    action = st.radio("Aksi", ["scan_kpi_shops", "run_kpi"], horizontal=True, key="codex_seller_action")
+    if st.button("Kirim ke Onyx Extension", type="primary", key="codex_seller_send"):
+        command = {"type": action, "period": period, "created_by": "codex", "shop_config": {"mode": "all"}}
+        st.success("Command Seller Center siap dibaca extension.")
+        st.components.v1.html(f"""
+        <script id="CODEX_EXTENSION_COMMAND" type="application/json">{_codex_json_script(command)}</script>
+        <div style="padding:10px;border:1px solid #d7dde8;border-radius:10px;background:#f8fafc">
+          <b>CODEX_EXTENSION_COMMAND</b><br/>Extension akan jalankan Seller Center memakai content/background Onyx.
+        </div>
+        <script>sessionStorage.removeItem('CODEX_ONYX_LAST_RESULT');</script>
+        """, height=90)
+    render_onyx_bridge_status_panel()
+
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
     st.session_state["issue_output_mode"] = st.sidebar.radio(
@@ -7231,7 +7337,7 @@ def build_menu() -> str:
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
+        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate", "Cek Kompetitor", "Cek Seller Center"],
         key="sidebar_main_menu",
     )
 
@@ -7324,6 +7430,12 @@ def build_menu() -> str:
         else:
             route = "affiliate_tiktokshop"
 
+    elif group == "Cek Kompetitor":
+        route = "cek_kompetitor"
+
+    elif group == "Cek Seller Center":
+        route = "cek_seller_center"
+
     else:
         route = "dashboard"
 
@@ -7388,6 +7500,10 @@ def main():
         render_analisa_margin()
     elif route in ("affiliate", "affiliate_tiktokshop"):
         render_affiliate_tiktokshop()
+    elif route == "cek_kompetitor":
+        render_cek_kompetitor()
+    elif route == "cek_seller_center":
+        render_cek_seller_center()
     else:
         st.error("Menu tidak dikenal.")
 
