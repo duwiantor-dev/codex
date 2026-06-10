@@ -7448,7 +7448,30 @@ def render_onyx_bridge_status_panel():
         if(!d.__CODEX_ONYX_BRIDGE__) return;
         if(d.kind === 'status') { state.status = d.message || 'Extension jalan...'; render(); }
         if(d.kind === 'result') { state.status = 'Hasil diterima dari Onyx Extension.'; addResult(d.result || {}); }
+        if(d.kind === 'state') {
+          if(Array.isArray(d.results)) state.results = d.results;
+          if(d.status) state.status = d.status;
+          render();
+        }
       });
+      function pollLegacyStorage(){
+        try{
+          const rawMany = sessionStorage.getItem('CODEX_ONYX_RESULTS') || '';
+          const rawLast = sessionStorage.getItem('CODEX_ONYX_LAST_RESULT') || '';
+          const st = sessionStorage.getItem('CODEX_ONYX_STATUS') || '';
+          if(st) state.status = st;
+          if(rawMany){
+            const many = JSON.parse(rawMany);
+            if(Array.isArray(many)) state.results = many;
+          } else if(rawLast) {
+            const one = JSON.parse(rawLast);
+            if(one) state.results = [one];
+          }
+          render();
+        }catch(_){}
+      }
+      setInterval(pollLegacyStorage, 1000);
+      setTimeout(pollLegacyStorage, 300);
       $('filter-box').addEventListener('input', e=>{state.filter = e.target.value || ''; render();});
       $('download-csv').addEventListener('click', downloadCsv);
       render();
