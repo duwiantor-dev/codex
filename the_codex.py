@@ -7242,35 +7242,219 @@ def _build_codex_shopee_url(keyword: str, mode: str) -> str:
 
 def render_onyx_bridge_status_panel():
     st.components.v1.html("""
-    <div id="codex-onyx-live-panel" style="font-family:Inter,Arial,sans-serif;border:1px solid #d7dde8;border-radius:12px;padding:12px;background:#fff">
-      <b>Codex ⇄ Onyx Extension</b>
-      <div id="codex-onyx-live-status" style="margin-top:6px;color:#667085">Menunggu extension membaca command...</div>
-      <div id="codex-onyx-live-result" style="margin-top:10px"></div>
+    <div id="onyx-root" class="onyx-shell">
+      <div class="onyx-head">
+        <div>
+          <div class="eyebrow">Codex ⇄ Onyx Extension</div>
+          <h3>Tabel Analisa</h3>
+          <div id="live-status" class="hint">Menunggu extension membaca command...</div>
+        </div>
+        <div class="actions">
+          <input id="filter-box" placeholder="Cari keyword / produk / toko..." />
+          <button id="download-csv" type="button">Download CSV</button>
+        </div>
+      </div>
+
+      <div class="metric-grid">
+        <div class="metric blue"><span>Jumlah Produk</span><b id="m-total">0</b><small>latest capture volatile</small></div>
+        <div class="metric purple"><span>Toko Dominan</span><b id="m-shop">-</b><small id="m-shop-note">share of voice</small></div>
+        <div class="metric teal"><span>Harga Minimum</span><b id="m-min">-</b><small>berdasarkan hasil scan</small></div>
+        <div class="metric pink"><span>Capture Masuk</span><b id="m-capture">0</b><small>refresh browser = hilang</small></div>
+      </div>
+
+      <section class="panel main-panel">
+        <div class="panel-title">Hasil Produk Terbaru</div>
+        <div class="table-wrap">
+          <table id="main-table">
+            <thead>
+              <tr>
+                <th class="w-keyword">keyword</th>
+                <th class="w-rank">rank</th>
+                <th class="w-prev">rank_prev</th>
+                <th class="w-change">rank_change</th>
+                <th class="w-shop">shop_name</th>
+                <th class="w-product">product_name</th>
+                <th class="w-price">price_text</th>
+                <th class="w-price">price_prev</th>
+                <th class="w-change">price_change</th>
+                <th class="w-sold">sold_text</th>
+                <th class="w-rating">rating</th>
+                <th class="w-link">link</th>
+              </tr>
+            </thead>
+            <tbody id="main-body"><tr><td colspan="12" class="empty">Belum ada hasil. Klik scan dulu.</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <div class="bottom-grid">
+        <section class="panel"><div class="panel-title">Share of Voice</div><div id="sov-box"></div></section>
+        <section class="panel"><div class="panel-title">Brand Distribution</div><div id="brand-box"></div></section>
+        <section class="panel"><div class="panel-title">Product Family Distribution</div><div id="family-box"></div></section>
+        <section class="panel"><div class="panel-title">Diagnosis Otomatis</div><div id="diagnosis-box" class="diagnosis">Belum ada diagnosis kuat. Tunggu hasil scan.</div></section>
+      </div>
     </div>
+
+    <style>
+      :root{color-scheme:dark}
+      .onyx-shell{font-family:Inter,Segoe UI,Arial,sans-serif;background:linear-gradient(180deg,#071326,#08172c);color:#ebf6ff;border:1px solid #173d64;border-radius:18px;padding:18px;box-shadow:0 18px 45px rgba(7,18,37,.28)}
+      .onyx-head{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;margin-bottom:16px}
+      .eyebrow{color:#40c3ff;font-size:12px;font-weight:800;text-transform:uppercase;letter-spacing:.09em}
+      h3{margin:3px 0 4px;font-size:22px;color:white;line-height:1.15}
+      .hint{color:#92b6db;font-size:13px}
+      .actions{display:flex;gap:8px;align-items:center;min-width:360px;justify-content:flex-end}
+      .actions input{background:#061122;color:#eff7ff;border:1px solid #21486e;border-radius:10px;padding:10px 12px;width:260px;outline:none}
+      .actions button{background:#0c6fc6;color:#fff;border:1px solid #118dec;border-radius:10px;padding:10px 12px;font-weight:800;cursor:pointer}
+      .metric-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px}
+      .metric{min-height:82px;border:1px solid #1a4067;border-radius:16px;padding:13px 14px;background:rgba(7,18,37,.94);position:relative;overflow:hidden}
+      .metric:before{content:"";position:absolute;inset:0 0 auto 0;height:4px;background:#149aff}
+      .metric.purple:before{background:#8b5cf6}.metric.teal:before{background:#14b8a6}.metric.pink:before{background:#ec4899}
+      .metric span{display:block;color:#88add2;font-size:11px;font-weight:800;letter-spacing:.06em;text-transform:uppercase}
+      .metric b{display:block;color:white;font-size:22px;line-height:1.15;margin-top:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .metric small{display:block;color:#76a0c8;font-size:12px;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .panel{background:rgba(7,18,37,.94);border:1px solid #1a4067;border-radius:16px;padding:13px;min-height:160px}
+      .main-panel{margin-bottom:14px}
+      .panel-title{color:#bfe1ff;font-size:13px;font-weight:900;margin-bottom:10px;text-transform:uppercase;letter-spacing:.03em}
+      .table-wrap{max-height:438px;overflow:auto;border:1px solid #143657;border-radius:12px;background:#071225}
+      table{border-collapse:collapse;width:100%;font-size:12.5px;table-layout:fixed}
+      thead th{position:sticky;top:0;background:#0d2242;color:#bfe1ff;z-index:2;border-bottom:1px solid #143657;padding:9px 8px;text-align:left;white-space:nowrap}
+      tbody td{border-bottom:1px solid #123457;padding:8px;color:#ebf6ff;vertical-align:middle;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      tbody tr:nth-child(even){background:rgba(10,26,50,.58)}
+      tbody tr:hover{background:rgba(17,72,117,.55)}
+      .empty{text-align:center;color:#92b6db;padding:38px!important}
+      .w-keyword{width:110px}.w-rank{width:58px}.w-prev{width:78px}.w-change{width:86px}.w-shop{width:185px}.w-product{width:360px}.w-price{width:120px}.w-sold{width:90px}.w-rating{width:76px}.w-link{width:110px}
+      .link-btn{display:inline-block;background:#102b4f;color:#9dd5ff!important;border:1px solid #225180;border-radius:999px;padding:4px 9px;text-decoration:none;font-weight:800;text-align:center}
+      .bottom-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+      .mini-table-wrap{max-height:220px;overflow:auto;border:1px solid #143657;border-radius:10px}
+      .mini-table th,.mini-table td{padding:8px;font-size:12px}
+      .diagnosis{white-space:pre-wrap;color:#d9ecff;line-height:1.45;max-height:220px;overflow:auto}
+      @media(max-width:900px){.onyx-head{display:block}.actions{min-width:0;margin-top:12px;justify-content:flex-start}.actions input{width:100%}.metric-grid{grid-template-columns:1fr 1fr}.bottom-grid{grid-template-columns:1fr}}
+    </style>
+
     <script>
-    const root = document.getElementById('codex-onyx-live-panel');
-    function renderFromStorage(){
-      const status = document.getElementById('codex-onyx-live-status');
-      const box = document.getElementById('codex-onyx-live-result');
-      let raw = sessionStorage.getItem('CODEX_ONYX_LAST_RESULT') || '';
-      if(!raw){ return; }
-      try{
-        const data = JSON.parse(raw);
-        const p = data.payload || data;
-        const items = p.items || p.products || [];
-        status.textContent = `Hasil masuk: ${items.length || 0} item (${p.keyword || p.mode || data.path || 'capture'})`;
-        if(items.length){
-          const rows = items.slice(0,80).map((x,i)=>`<tr><td>${x.rank || i+1}</td><td>${escapeHtml(x.name || x.title || '')}</td><td>${escapeHtml(x.price || x.price_text || '')}</td><td>${escapeHtml(x.sold || x.sold_text || '')}</td><td>${escapeHtml(x.shop_name || x.shop || x.shop_id || '')}</td></tr>`).join('');
-          box.innerHTML = `<div style="max-height:520px;overflow:auto"><table style="border-collapse:collapse;width:100%;font-size:13px"><thead><tr><th>Rank</th><th>Produk</th><th>Harga</th><th>Terjual</th><th>Toko</th></tr></thead><tbody>${rows}</tbody></table></div>`;
-        } else {
-          box.innerHTML = `<pre style="white-space:pre-wrap;max-height:360px;overflow:auto">${escapeHtml(JSON.stringify(p,null,2))}</pre>`;
+    (function(){
+      const state = { results: [], status: 'Menunggu extension membaca command...', filter: '' };
+      const brands = ['Lenovo','Asus','Acer','HP','Dell','MSI','Axioo','Advan','Apple','Samsung','Zyrex'];
+      const families = ['ThinkPad','IdeaPad','Legion','LOQ','Yoga','VivoBook','ZenBook','ROG','TUF','Aspire','Predator','Nitro','Latitude','Inspiron','Pavilion','Omen','Victus','MacBook'];
+      const $ = (id)=>document.getElementById(id);
+      function esc(s){return String(s ?? '').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
+      function digits(s){const d=String(s ?? '').replace(/[^0-9]/g,''); return d ? Number(d) : null;}
+      function money(n){return n ? ('Rp '+Math.round(n).toLocaleString('id-ID')) : '-';}
+      function normText(s){return String(s ?? '').replace(/\s+/g,' ').trim();}
+      function pick(obj, keys, fallback=''){for(const k of keys){const v=obj && obj[k]; if(v!==undefined && v!==null && String(v).trim()!=='') return v;} return fallback;}
+      function classify(name, list){const hay=(' '+String(name||'')+' ').toLowerCase(); for(const x of list){const re=new RegExp('(^|[^a-z0-9])'+x.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'([^a-z0-9]|$)'); if(re.test(hay)) return x;} return 'UNKNOWN';}
+      function resultKey(result){const p = result.payload || result || {}; return String(p.scan_id || result.scan_id || p.keyword+'|'+p.mode+'|'+(result.path||''));}
+      function addResult(result){
+        if(!result) return;
+        const key = resultKey(result);
+        const idx = state.results.findIndex(r=>resultKey(r)===key);
+        if(idx>=0) state.results[idx] = result; else state.results.push(result);
+        render();
+      }
+      function normalizeRows(){
+        const out = [];
+        state.results.forEach((res)=>{
+          const p = res.payload || res || {};
+          const items = Array.isArray(p.items) ? p.items : (Array.isArray(p.products) ? p.products : (Array.isArray(p.shops) ? p.shops : []));
+          items.forEach((x, idx)=>{
+            const product = normText(pick(x, ['product_name','name','title','display_name','raw_title']));
+            const priceText = normText(pick(x, ['price_text','price','last_price']));
+            const priceNum = pick(x, ['price_num','price_number'], null) || digits(priceText);
+            const shop = normText(pick(x, ['shop_name','shop','seller_name','shop_id','shop_username','username'], 'UNKNOWN'));
+            const keyword = normText(pick(x, ['keyword'], p.keyword || ''));
+            const mode = normText(pick(x, ['mode'], p.mode || ''));
+            out.push({
+              keyword, mode,
+              rank: pick(x, ['rank'], idx+1),
+              rank_prev: pick(x, ['rank_prev'], '-'),
+              rank_change: pick(x, ['rank_change'], '-'),
+              shop_name: shop,
+              product_name: product,
+              price_text: priceText,
+              price_num: priceNum,
+              price_prev: pick(x, ['price_prev'], '-'),
+              price_change: pick(x, ['price_change'], '-'),
+              sold_text: normText(pick(x, ['sold_text','sold'], '')),
+              rating: normText(pick(x, ['rating'], '')),
+              link: normText(pick(x, ['link','url','detail_url'], '')),
+              brand: pick(x, ['brand'], classify(product, brands)),
+              family: pick(x, ['family'], classify(product, families))
+            });
+          });
+        });
+        return out;
+      }
+      function countBy(rows, field){
+        const total = Math.max(1, rows.length), m = new Map();
+        rows.forEach(r=>{const k = normText(r[field]) || 'UNKNOWN'; m.set(k, (m.get(k)||0)+1);});
+        return Array.from(m.entries()).sort((a,b)=>b[1]-a[1]).map(([name,count])=>({name,count,share:Math.round(count/total*10000)/100}));
+      }
+      function miniTable(rows, firstCol){
+        if(!rows.length) return '<div class="empty">Belum ada data.</div>';
+        const body = rows.slice(0,30).map(r=>`<tr><td title="${esc(r.name)}">${esc(r.name)}</td><td>${r.count}</td><td>${r.share}%</td></tr>`).join('');
+        return `<div class="mini-table-wrap"><table class="mini-table"><thead><tr><th>${esc(firstCol)}</th><th>count</th><th>share</th></tr></thead><tbody>${body}</tbody></table></div>`;
+      }
+      function csv(rows){
+        const cols = ['keyword','mode','rank','shop_name','product_name','price_text','sold_text','rating','link'];
+        const q = (v)=>'"'+String(v??'').replace(/"/g,'""')+'"';
+        return [cols.join(',')].concat(rows.map(r=>cols.map(c=>q(r[c])).join(','))).join('\n');
+      }
+      function downloadCsv(){
+        const rows = filteredRows(); if(!rows.length) return;
+        const blob = new Blob([csv(rows)], {type:'text/csv;charset=utf-8'});
+        const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'codex_cek_kompetitor_volatile.csv'; a.click(); setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+      }
+      function filteredRows(){
+        const rows = normalizeRows();
+        const needle = state.filter.toLowerCase().trim();
+        if(!needle) return rows;
+        return rows.filter(r=>[r.keyword,r.mode,r.shop_name,r.product_name,r.price_text,r.sold_text,r.rating].join(' ').toLowerCase().includes(needle));
+      }
+      function render(){
+        const allRows = normalizeRows();
+        const rows = filteredRows();
+        $('live-status').textContent = state.status || (allRows.length ? `Hasil masuk: ${allRows.length} item` : 'Menunggu extension membaca command...');
+        const sov = countBy(allRows, 'shop_name');
+        const minPrice = allRows.map(r=>Number(r.price_num||0)).filter(n=>n>0).sort((a,b)=>a-b)[0] || null;
+        $('m-total').textContent = String(allRows.length);
+        $('m-shop').textContent = sov[0]?.name || '-';
+        $('m-shop-note').textContent = sov[0] ? `${sov[0].share}% share` : 'share of voice';
+        $('m-min').textContent = money(minPrice);
+        $('m-capture').textContent = String(state.results.length);
+        if(!rows.length){ $('main-body').innerHTML = `<tr><td colspan="12" class="empty">${allRows.length ? 'Tidak ada hasil sesuai filter.' : 'Belum ada hasil. Klik scan dulu.'}</td></tr>`; }
+        else {
+          $('main-body').innerHTML = rows.slice(0,300).map(r=>`<tr>
+            <td title="${esc(r.keyword)}">${esc(r.keyword)}</td>
+            <td>${esc(r.rank)}</td>
+            <td>${esc(r.rank_prev)}</td>
+            <td>${esc(r.rank_change)}</td>
+            <td title="${esc(r.shop_name)}">${esc(r.shop_name)}</td>
+            <td title="${esc(r.product_name)}">${esc(r.product_name)}</td>
+            <td title="${esc(r.price_text)}">${esc(r.price_text)}</td>
+            <td>${esc(r.price_prev)}</td>
+            <td>${esc(r.price_change)}</td>
+            <td title="${esc(r.sold_text)}">${esc(r.sold_text)}</td>
+            <td>${esc(r.rating)}</td>
+            <td>${r.link ? `<a class="link-btn" href="${esc(r.link)}" target="_blank" rel="noopener">Buka Produk</a>` : '-'}</td>
+          </tr>`).join('');
         }
-      }catch(e){ status.textContent = 'Ada hasil, tapi gagal render: '+e; }
-    }
-    function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));}
-    setInterval(renderFromStorage, 800); renderFromStorage();
+        $('sov-box').innerHTML = miniTable(sov, 'shop_name');
+        $('brand-box').innerHTML = miniTable(countBy(allRows, 'brand'), 'brand');
+        $('family-box').innerHTML = miniTable(countBy(allRows, 'family'), 'family');
+        $('diagnosis-box').textContent = allRows.length ? `• Data tampil volatile dari extension, tanpa database.\n• Rank/harga pembanding dibuat kosong karena Codex tidak menyimpan snapshot lama.\n• Toko dominan: ${sov[0]?.name || '-'}${sov[0] ? ' ('+sov[0].share+'%)' : ''}.\n• Harga minimum: ${money(minPrice)}.` : 'Belum ada diagnosis kuat. Jalankan scan dulu.';
+      }
+      window.addEventListener('message', (event)=>{
+        const d = event.data || {};
+        if(!d.__CODEX_ONYX_BRIDGE__) return;
+        if(d.kind === 'status') { state.status = d.message || 'Extension jalan...'; render(); }
+        if(d.kind === 'result') { state.status = 'Hasil diterima dari Onyx Extension.'; addResult(d.result || {}); }
+      });
+      $('filter-box').addEventListener('input', e=>{state.filter = e.target.value || ''; render();});
+      $('download-csv').addEventListener('click', downloadCsv);
+      render();
+    })();
     </script>
-    """, height=650)
+    """, height=980)
 
 
 def render_cek_kompetitor():
@@ -7296,7 +7480,7 @@ def render_cek_kompetitor():
         if not scans:
             st.warning("Isi keyword dulu.")
         else:
-            command = {"type": "scan_shopee", "mode": mode, "scans": scans, "created_by": "codex"}
+            command = {"type": "scan_shopee", "mode": mode, "batch_id": batch_id, "scans": scans, "created_by": "codex"}
             st.success(f"Command siap dibaca extension: {len(scans)} keyword.")
             st.components.v1.html(f"""
             <script id="CODEX_EXTENSION_COMMAND" type="application/json">{_codex_json_script(command)}</script>
