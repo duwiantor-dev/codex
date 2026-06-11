@@ -7856,43 +7856,93 @@ def posting_parse_specification_pairs(spec_text: str) -> List[Tuple[str, str]]:
     return pairs
 
 
+POSTING_SPEC_GROUPS = [
+    {"Brand", "Tipe", "Type", "Model", "Color"},
+    {"Operating System"},
+    {"Processor", "Graphics", "VGA"},
+    {"RAM", "Memory", "Storage", "SSD", "HDD"},
+    {"Main Display Size", "Main Display Type", "Display Size", "Display Type", "Display Resolution", "Resolution"},
+    {"Camera", "Audio"},
+    {"Battery", "Charger"},
+    {"Connectivity", "Ports"},
+    {"Dimension", "Dimensions", "Weight", "Warranty", "Garansi"},
+]
+
+
+def posting_spec_group_index(label: str) -> int:
+    clean_label = posting_clean_text(label)
+    for idx, group in enumerate(POSTING_SPEC_GROUPS):
+        if clean_label in group:
+            return idx
+    return len(POSTING_SPEC_GROUPS)
+
+
+def posting_format_ports_for_copy(value: str) -> str:
+    """Bikin field Ports lebih enak dicopy seperti tampilan AGRES.ID."""
+    value = posting_clean_text(value)
+    if not value:
+        return ""
+
+    # Ubah "2x USB-A 2x Thunderbolt 1x HDMI" menjadi baris terpisah.
+    parts = re.split(r"\s+(?=\d+\s*x\s+)", value, flags=re.I)
+    parts = [posting_clean_text(part) for part in parts if posting_clean_text(part)]
+    if len(parts) >= 2:
+        return "Ports:\n" + "\n".join(parts)
+
+    # Fallback kalau AGRES merender dengan koma.
+    if "," in value:
+        comma_parts = [posting_clean_text(part) for part in value.split(",") if posting_clean_text(part)]
+        if len(comma_parts) >= 2:
+            return "Ports:\n" + "\n".join(comma_parts)
+
+    return f"Ports: {value}"
+
+
 def posting_format_specification_text(spec_text: str) -> str:
+    """Format spesifikasi menjadi teks siap copy, mirip layout AGRES.ID."""
     pairs = posting_parse_specification_pairs(spec_text)
     if not pairs:
-        return posting_clean_text(spec_text)
-    return "\n".join(f"{label}: {value}" for label, value in pairs)
+        raw = str(spec_text or "").strip()
+        raw = re.sub(r"\n{3,}", "\n\n", raw)
+        return raw or posting_clean_text(spec_text)
+
+    output_lines: List[str] = ["SPESIFIKASI", ""]
+    previous_group = None
+
+    for label, value in pairs:
+        label = posting_clean_text(label)
+        value = posting_clean_text(value)
+        if not label or not value:
+            continue
+
+        current_group = posting_spec_group_index(label)
+        if previous_group is not None and current_group != previous_group:
+            if output_lines and output_lines[-1] != "":
+                output_lines.append("")
+
+        if label == "Ports":
+            output_lines.append(posting_format_ports_for_copy(value))
+        else:
+            output_lines.append(f"{label}: {value}")
+
+        previous_group = current_group
+
+    formatted = "\n".join(output_lines).strip()
+    formatted = re.sub(r"\n{3,}", "\n\n", formatted)
+    return formatted
 
 
 def posting_render_specification_table(spec_text: str):
-    pairs = posting_parse_specification_pairs(spec_text)
-    if not pairs:
-        st.text_area(
-            "Deskripsi / Spesifikasi AGRES.ID",
-            value=posting_clean_text(spec_text),
-            height=220,
-        )
+    copy_text = posting_format_specification_text(spec_text)
+    if not copy_text:
+        st.warning("Deskripsi/spesifikasi belum terbaca dari halaman AGRES.ID untuk SKU ini.")
         return
 
-    rows_html = []
-    for label, value in pairs:
-        rows_html.append(
-            "<tr>"
-            f"<td style='width:220px;padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;vertical-align:top;background:#f9fafb'>{html_lib.escape(label)}</td>"
-            f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;vertical-align:top;line-height:1.55'>{html_lib.escape(value)}</td>"
-            "</tr>"
-        )
-
-    st.markdown(
-        """
-        <div style="margin-top:8px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:white">
-            <table style="width:100%;border-collapse:collapse;font-size:14px">
-        """
-        + "".join(rows_html)
-        + """
-            </table>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    st.text_area(
+        "Spesifikasi siap copy",
+        value=copy_text,
+        height=430,
+        key=f"posting_spec_copy_{abs(hash(copy_text)) % 100000000}",
     )
 
 
