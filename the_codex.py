@@ -7241,10 +7241,10 @@ def render_analisa_margin():
 # ============================================================
 POSTING_SHOPEE_BASE_URL = "https://www.agres.id"
 POSTING_SHOPEE_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; CodexPostingShopee/1.0)"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36 CodexPostingShopee/1.1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
 }
-
-
 
 
 def ensure_posting_shopee_dependencies():
@@ -7262,88 +7262,170 @@ def ensure_posting_shopee_dependencies():
             + ". Tambahkan package tersebut ke requirements.txt lalu redeploy aplikasi."
         )
 
+
 def posting_clean_text(text):
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
+def posting_sku_tokens(text: str) -> List[str]:
+    raw = posting_clean_text(text)
+    parts = [p for p in re.split(r"[-_\s/]+", raw) if p]
+    tokens = []
+    for p in parts:
+        p = p.strip()
+        if len(p) >= 4:
+            tokens.append(p)
+    return tokens
+
+
+def posting_query_variants(kodebarang, spesifikasi) -> List[str]:
+    kodebarang = posting_clean_text(kodebarang)
+    spesifikasi = posting_clean_text(spesifikasi)
+    tokens = posting_sku_tokens(kodebarang)
+
+    variants = []
+    if spesifikasi and kodebarang:
+        variants.append(f"{spesifikasi} {kodebarang}")
+    if kodebarang:
+        variants.append(kodebarang)
+    if tokens:
+        variants.append(" ".join(tokens[-2:]))
+        variants.append(tokens[-1])
+    if spesifikasi:
+        variants.append(spesifikasi)
+
+    seen = set()
+    clean_variants = []
+    for q in variants:
+        q = posting_clean_text(q)
+        key = q.lower()
+        if q and key not in seen:
+            seen.add(key)
+            clean_variants.append(q)
+    return clean_variants
+
+
 def posting_get_html(url):
     ensure_posting_shopee_dependencies()
-    response = requests.get(url, headers=POSTING_SHOPEE_HEADERS, timeout=30)
-    response.raise_for_status()
-    time.sleep(0.35)
-    return response.text
+    with requests.Session() as session:
+        response = session.get(url, headers=POSTING_SHOPEE_HEADERS, timeout=35)
+        response.raise_for_status()
+        time.sleep(0.25)
+        return response.text
+
+
+def posting_product_url_from_text(text: str) -> str:
+    if not text:
+        return ""
+    match = re.search(r"https?://(?:www\.)?agres\.id/products/[^\s\"'<>]+", str(text), flags=re.I)
+    if match:
+        return match.group(0).rstrip("),.;")
+    return ""
+
+
+def posting_extract_product_links_from_html(html: str) -> List[Dict[str, str]]:
+    soup = BeautifulSoup(html, "html.parser")
+    candidates = []
+
+    for a in soup.select("a[href]"):
+        href = a.get("href", "")
+        if "/products/" not in href:
+            continue
+        title = posting_clean_text(a.get_text(" "))
+        full_url = urljoin(POSTING_SHOPEE_BASE_URL, href)
+        candidates.append({"title": title, "url": full_url})
+
+    # Next/React pages kadang menyimpan link di script, bukan anchor biasa.
+    for href in re.findall(r"(?:https?://www\.agres\.id)?/products/[^\"'<>\s]+", html, flags=re.I):
+        full_url = urljoin(POSTING_SHOPEE_BASE_URL, href.replace("\\/", "/"))
+        candidates.append({"title": "", "url": full_url})
+
+    seen = set()
+    unique = []
+    for item in candidates:
+        url = item.get("url", "").split("?")[0]
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        unique.append({"title": item.get("title", ""), "url": url})
+    return unique
 
 
 def posting_search_product(query):
+    # Tetap langsung mengambil dari AGRES.ID, bukan Google/Bing/API luar.
     search_urls = [
         f"{POSTING_SHOPEE_BASE_URL}/catalogue?search={quote_plus(query)}",
         f"{POSTING_SHOPEE_BASE_URL}/search?q={quote_plus(query)}",
     ]
 
     candidates = []
-
+    errors = []
     for url in search_urls:
         try:
             html = posting_get_html(url)
-            soup = BeautifulSoup(html, "html.parser")
+            candidates.extend(posting_extract_product_links_from_html(html))
+        except Exception as error:
+            errors.append(f"{url}: {error}")
 
-            for a in soup.select("a[href]"):
-                href = a.get("href", "")
+    # Simpan error untuk dipakai kalau semua query gagal total.
+    posting_search_product.last_errors = errors
+    return candidates
 
-                if "/products/" not in href:
-                    continue
 
-                title = posting_clean_text(a.get_text(" "))
-                full_url = urljoin(POSTING_SHOPEE_BASE_URL, href)
+posting_search_product.last_errors = []
 
-                if title or full_url:
-                    candidates.append({
-                        "title": title,
-                        "url": full_url,
-                    })
 
-        except Exception:
-            pass
+def posting_score_candidate(query: str, kodebarang: str, spesifikasi: str, candidate: Dict[str, str]) -> int:
+    compare_text = f'{candidate.get("title", "")} {candidate.get("url", "")}'.lower()
+    query_score = fuzz.token_set_ratio(query.lower(), compare_text)
 
-    seen = set()
-    unique = []
+    kode_tokens = posting_sku_tokens(kodebarang)
+    token_bonus = 0
+    for token in kode_tokens:
+        if token.lower() in compare_text:
+            token_bonus += 18
 
-    for item in candidates:
-        if item["url"] in seen:
-            continue
+    spec_tokens = [t for t in posting_sku_tokens(spesifikasi) if len(t) >= 5]
+    for token in spec_tokens[:8]:
+        if token.lower() in compare_text:
+            token_bonus += 3
 
-        seen.add(item["url"])
-        unique.append(item)
-
-    return unique
+    return min(100, int(query_score + token_bonus))
 
 
 def posting_find_best_match(kodebarang, spesifikasi):
-    query = f"{spesifikasi} {kodebarang}".strip()
-    candidates = posting_search_product(query)
+    direct_url = posting_product_url_from_text(kodebarang) or posting_product_url_from_text(spesifikasi)
+    if direct_url:
+        return {"title": "", "url": direct_url, "score": 100, "source": "DIRECT_URL"}
 
-    if not candidates:
-        parts = re.split(r"[-_ ]+", kodebarang)
-        short_query = " ".join(parts[-2:]) if len(parts) >= 2 else kodebarang
-        candidates = posting_search_product(short_query)
+    all_candidates = []
+    all_errors = []
+    queries = posting_query_variants(kodebarang, spesifikasi)
 
-    if not candidates:
-        return None
+    for query in queries:
+        candidates = posting_search_product(query)
+        all_errors.extend(getattr(posting_search_product, "last_errors", []))
+        for item in candidates:
+            item = dict(item)
+            item["query"] = query
+            item["score"] = posting_score_candidate(query, kodebarang, spesifikasi, item)
+            item["source"] = "AGRES_SEARCH"
+            all_candidates.append(item)
+        if any(int(c.get("score", 0)) >= 85 for c in all_candidates):
+            break
 
-    best = None
-    best_score = 0
+    unique = {}
+    for item in all_candidates:
+        url = item.get("url", "")
+        if not url:
+            continue
+        if url not in unique or int(item.get("score", 0)) > int(unique[url].get("score", 0)):
+            unique[url] = item
 
-    for item in candidates:
-        compare_text = f'{item["title"]} {item["url"]}'
-        score = fuzz.token_set_ratio(query.lower(), compare_text.lower())
+    if not unique:
+        return {"not_found_error": "; ".join(all_errors[-2:]) if all_errors else "Tidak ada link produk dari hasil pencarian AGRES.ID"}
 
-        if score > best_score:
-            best_score = score
-            best = item
-
-    if best:
-        best["score"] = best_score
-
+    best = max(unique.values(), key=lambda x: int(x.get("score", 0)))
     return best
 
 
@@ -7480,6 +7562,10 @@ def posting_extract_title(soup):
     if og_title and og_title.get("content"):
         return posting_clean_text(og_title.get("content"))
 
+    title_tag = soup.find("title")
+    if title_tag:
+        return posting_clean_text(title_tag.get_text(" "))
+
     return ""
 
 
@@ -7532,6 +7618,15 @@ def posting_extract_images(soup, html, limit=4):
 
     images = []
     identities = set()
+
+    # Ambil meta image lebih dulu. Ini biasanya gambar produk utama AGRES.ID.
+    for meta_selector in [
+        {"property": "og:image"},
+        {"name": "twitter:image"},
+    ]:
+        meta = soup.find("meta", attrs=meta_selector)
+        if meta and meta.get("content"):
+            posting_add_image(images, identities, meta.get("content"), "meta")
 
     gallery_keywords = ["gallery", "thumbnail", "thumb", "swiper", "slick", "carousel"]
     image_rows = []
@@ -7604,6 +7699,7 @@ def posting_extract_specification(soup):
         r"(SPECIFICATIONS.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
         r"(SPESIFIKASI.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
         r"(Informasi\s*&\s*Spesifikasi.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
+        r"(Deskripsi\s+Deskripsi.*?)(?:Related Items|Berlangganan Newsletter|Produk Terkait)",
     ]
 
     spec_text = ""
@@ -7616,7 +7712,7 @@ def posting_extract_specification(soup):
             break
 
     if not spec_text:
-        possible_headers = soup.find_all(string=re.compile(r"SPECIFICATIONS|SPESIFIKASI|Informasi", re.I))
+        possible_headers = soup.find_all(string=re.compile(r"SPECIFICATIONS|SPESIFIKASI|Informasi|Deskripsi", re.I))
 
         for header in possible_headers:
             parent = header.parent
@@ -7671,10 +7767,26 @@ def posting_extract_specification(soup):
     return "\n".join(cleaned_lines[:100])
 
 
+def posting_extract_brand_category_sku(soup):
+    text = soup.get_text("\n")
+    result = {"brand": "", "kategori": "", "sku_web": ""}
+    patterns = {
+        "brand": r"Brand\s*:\s*([^\n]+)",
+        "kategori": r"Kategori\s*:\s*([^\n]+)",
+        "sku_web": r"SKU\s*:\s*([^\n]+)",
+    }
+    for key, pattern in patterns.items():
+        m = re.search(pattern, text, flags=re.I)
+        if m:
+            result[key] = posting_clean_text(m.group(1))
+    return result
+
+
 def posting_scrape_product(url):
     html = posting_get_html(url)
     soup = BeautifulSoup(html, "html.parser")
     images = posting_extract_images(soup, html, limit=4)
+    extra = posting_extract_brand_category_sku(soup)
 
     return {
         "title": posting_extract_title(soup),
@@ -7683,6 +7795,9 @@ def posting_scrape_product(url):
         "image_3": images[2],
         "image_4": images[3],
         "spesifikasi_web": posting_extract_specification(soup),
+        "brand": extra.get("brand", ""),
+        "kategori": extra.get("kategori", ""),
+        "sku_web": extra.get("sku_web", ""),
     }
 
 
@@ -7700,14 +7815,20 @@ def create_posting_shopee_excel_download(df):
 
         widths = {
             "A": 22,
-            "B": 55,
-            "C": 70,
-            "D": 70,
-            "E": 70,
-            "F": 70,
-            "G": 75,
-            "H": 18,
+            "B": 60,
+            "C": 72,
+            "D": 72,
+            "E": 72,
+            "F": 72,
+            "G": 85,
+            "H": 20,
             "I": 35,
+            "J": 80,
+            "K": 18,
+            "L": 22,
+            "M": 22,
+            "N": 18,
+            "O": 18,
         }
 
         for col, width in widths.items():
@@ -7737,7 +7858,7 @@ def process_posting_shopee_bulk(df):
         try:
             best = posting_find_best_match(kodebarang, spesifikasi_input)
 
-            if not best:
+            if not best or best.get("not_found_error"):
                 results.append({
                     "KODEBARANG": kodebarang,
                     "PRODUCT": "",
@@ -7747,17 +7868,25 @@ def process_posting_shopee_bulk(df):
                     "IMAGE_4": "",
                     "SPESIFIKASI_WEB": "",
                     "STATUS": "NOT_FOUND",
-                    "ERROR_MESSAGE": "Produk tidak ditemukan di AGRES.ID",
+                    "ERROR_MESSAGE": best.get("not_found_error", "Produk tidak ditemukan di AGRES.ID") if isinstance(best, dict) else "Produk tidak ditemukan di AGRES.ID",
+                    "AGRES_URL": "",
+                    "MATCH_SCORE": "",
+                    "MATCH_SOURCE": "",
+                    "BRAND_WEB": "",
+                    "KATEGORI_WEB": "",
+                    "SKU_WEB": "",
                 })
 
                 logs.append(f"❌ {kodebarang} - NOT_FOUND")
+                progress.progress(no / total)
+                log_box.text("\n".join(logs[-12:]))
                 continue
 
             product = posting_scrape_product(best["url"])
 
             results.append({
                 "KODEBARANG": kodebarang,
-                "PRODUCT": product["title"] or best["title"],
+                "PRODUCT": product["title"] or best.get("title", ""),
                 "IMAGE_1": product["image_1"],
                 "IMAGE_2": product["image_2"],
                 "IMAGE_3": product["image_3"],
@@ -7765,9 +7894,15 @@ def process_posting_shopee_bulk(df):
                 "SPESIFIKASI_WEB": product["spesifikasi_web"],
                 "STATUS": "FOUND",
                 "ERROR_MESSAGE": "",
+                "AGRES_URL": best["url"],
+                "MATCH_SCORE": best.get("score", ""),
+                "MATCH_SOURCE": best.get("source", ""),
+                "BRAND_WEB": product.get("brand", ""),
+                "KATEGORI_WEB": product.get("kategori", ""),
+                "SKU_WEB": product.get("sku_web", ""),
             })
 
-            logs.append(f"✅ {kodebarang} - FOUND")
+            logs.append(f"✅ {kodebarang} - FOUND dari AGRES.ID")
 
         except Exception as error:
             results.append({
@@ -7780,9 +7915,15 @@ def process_posting_shopee_bulk(df):
                 "SPESIFIKASI_WEB": "",
                 "STATUS": "ERROR",
                 "ERROR_MESSAGE": str(error),
+                "AGRES_URL": "",
+                "MATCH_SCORE": "",
+                "MATCH_SOURCE": "",
+                "BRAND_WEB": "",
+                "KATEGORI_WEB": "",
+                "SKU_WEB": "",
             })
 
-            logs.append(f"⚠️ {kodebarang} - ERROR")
+            logs.append(f"⚠️ {kodebarang} - ERROR: {error}")
 
         progress.progress(no / total)
         log_box.text("\n".join(logs[-12:]))
@@ -7801,7 +7942,7 @@ def render_posting_shopee():
         st.error(str(error))
         st.code("requests\nbeautifulsoup4\nrapidfuzz")
         st.stop()
-    st.caption("Generate data posting bulk dari pricelist. Mode bulk tidak render preview per produk agar aman untuk 100–200+ SKU.")
+    st.caption("Generate data posting bulk langsung dari AGRES.ID. Mode bulk tidak render preview per produk agar aman untuk 100–200+ SKU.")
 
     st.write("Upload Excel dengan kolom:")
     st.code("KODEBARANG | SPESIFIKASI | HARGA | STOK")
@@ -7830,6 +7971,10 @@ def render_posting_shopee():
 
             st.success("Selesai generate data.")
             st.write(f"FOUND: {found_count} | NOT_FOUND: {not_found_count} | ERROR: {error_count}")
+
+            preview_cols = [col for col in ["KODEBARANG", "PRODUCT", "STATUS", "AGRES_URL", "MATCH_SCORE", "ERROR_MESSAGE"] if col in result_df.columns]
+            if preview_cols:
+                st.dataframe(result_df[preview_cols], use_container_width=True)
 
             st.download_button(
                 "Download Hasil Excel",
