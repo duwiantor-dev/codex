@@ -7846,54 +7846,320 @@ def render_posting_tiktokshop():
 
 
 # ============================================================
-# ORACLE - VIDEO FINDER (STREAMLIT BRIDGE)
+# ORACLE - VIDEO FINDER (EMBEDDED ENGINE DI DALAM CODEX)
 # ============================================================
-def oracle_clean_api_base(value: str) -> str:
-    base = s_clean(value or ORACLE_API_BASE_DEFAULT)
-    if not base:
-        base = ORACLE_API_BASE_DEFAULT
-    return base.rstrip("/")
+# Catatan teknis:
+# - Ini mengganti bridge eksternal Oracle API. User cukup menjalankan Codex.
+# - Chrome extension Oracle tetap boleh di-load manual. Extension lama tetap cocok
+#   karena endpoint kompatibel tetap hidup di http://127.0.0.1:8000.
+# - Kalau Codex dipasang di Streamlit Cloud, extension browser user TIDAK bisa
+#   mengakses 127.0.0.1 milik server cloud. Mode extension lokal paling aman
+#   untuk Codex yang jalan di komputer user / server lokal kantor.
+
+ORACLE_EMBEDDED_API_HOST = os.environ.get("ORACLE_EMBEDDED_API_HOST", "127.0.0.1")
+ORACLE_EMBEDDED_API_PORT = int(os.environ.get("ORACLE_EMBEDDED_API_PORT", "8000"))
+ORACLE_API_BASE_DEFAULT = f"http://{ORACLE_EMBEDDED_API_HOST}:{ORACLE_EMBEDDED_API_PORT}"
+ORACLE_EMBEDDED_ROOT = Path(os.environ.get("ORACLE_EMBEDDED_ROOT", "codex_oracle_runtime")).resolve()
+ORACLE_OUTPUT_DIR = ORACLE_EMBEDDED_ROOT / "output"
+ORACLE_VIDEO_DIR = ORACLE_OUTPUT_DIR / "videos"
+ORACLE_IMAGE_DIR = ORACLE_OUTPUT_DIR / "images"
+ORACLE_STATE_PATH = ORACLE_EMBEDDED_ROOT / "oracle_state.json"
 
 
-def oracle_get_api_base() -> str:
-    if "oracle_api_base" not in st.session_state:
-        st.session_state["oracle_api_base"] = ORACLE_API_BASE_DEFAULT
-    return oracle_clean_api_base(st.session_state.get("oracle_api_base") or ORACLE_API_BASE_DEFAULT)
+def _oracle_now_text() -> str:
+    import datetime as _dt
+    return _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def oracle_http_request(method: str, path: str, *, data: Optional[Dict[str, Any]] = None, timeout: int = 20, allow_redirects: bool = False) -> Dict[str, Any]:
-    if requests is None:
-        return {"ok": False, "message": "Package requests belum terinstall.", "status_code": None, "text": ""}
+def _oracle_utc_iso() -> str:
+    import datetime as _dt
+    return _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-    base = oracle_get_api_base()
-    url = f"{base}/{path.lstrip('/')}"
+
+def _oracle_new_state() -> Dict[str, Any]:
+    return {
+        "next_job_id": 1,
+        "next_product_id": 1,
+        "jobs": {},
+        "products": {},
+        "logs": [],
+        "queue": {
+            "running": False,
+            "total": 0,
+            "done": 0,
+            "last_message": "Queue belum berjalan.",
+            "updated_at": None,
+            "interval_minutes": 20,
+            "post_now": False,
+        },
+    }
+
+
+def _oracle_prepare_dirs() -> None:
+    ORACLE_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+    ORACLE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _oracle_load_state() -> Dict[str, Any]:
+    _oracle_prepare_dirs()
+    if not ORACLE_STATE_PATH.exists():
+        return _oracle_new_state()
     try:
-        if method.upper() == "POST":
-            response = requests.post(url, data=data or {}, timeout=timeout, allow_redirects=allow_redirects)
-        else:
-            response = requests.get(url, timeout=timeout, allow_redirects=allow_redirects)
-        return {
-            "ok": response.status_code < 400,
-            "status_code": response.status_code,
-            "headers": dict(response.headers),
-            "text": response.text,
-            "url": url,
-        }
-    except Exception as exc:
-        return {"ok": False, "message": str(exc), "status_code": None, "text": "", "url": url}
-
-
-def oracle_status() -> Dict[str, Any]:
-    res = oracle_http_request("GET", "/scanner/active", timeout=2, allow_redirects=False)
-    if not res.get("ok"):
-        return {"online": False, "message": res.get("message") or f"HTTP {res.get('status_code')}"}
-    try:
-        # Tidak perlu import json global; response object tidak disimpan, jadi parsing manual via requests lagi tidak ada.
         import json as _json
-        data = _json.loads(res.get("text") or "{}")
+        with ORACLE_STATE_PATH.open("r", encoding="utf-8") as fh:
+            data = _json.load(fh)
+        base = _oracle_new_state()
+        base.update(data if isinstance(data, dict) else {})
+        base.setdefault("jobs", {})
+        base.setdefault("products", {})
+        base.setdefault("logs", [])
+        base.setdefault("queue", _oracle_new_state()["queue"])
+        return base
     except Exception:
-        data = {}
-    return {"online": True, "data": data, "message": data.get("message") or "Oracle engine online."}
+        return _oracle_new_state()
+
+
+def _oracle_save_state(state: Dict[str, Any]) -> None:
+    _oracle_prepare_dirs()
+    try:
+        import json as _json
+        tmp = ORACLE_STATE_PATH.with_suffix(".tmp")
+        with tmp.open("w", encoding="utf-8") as fh:
+            _json.dump(state, fh, ensure_ascii=False, indent=2)
+        tmp.replace(ORACLE_STATE_PATH)
+    except Exception:
+        pass
+
+
+def _oracle_with_state(mutator):
+    import threading as _threading
+    lock = getattr(_oracle_with_state, "_lock", None)
+    if lock is None:
+        lock = _threading.RLock()
+        setattr(_oracle_with_state, "_lock", lock)
+    with lock:
+        state = _oracle_load_state()
+        result = mutator(state)
+        _oracle_save_state(state)
+        return result
+
+
+def oracle_log(message: str) -> None:
+    def _mut(state):
+        line = f"{_oracle_now_text()} · {str(message).strip()}"
+        state.setdefault("logs", []).append(line)
+        del state["logs"][:-80]
+    _oracle_with_state(_mut)
+
+
+def oracle_parse_number(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    txt = str(value).strip().lower().replace("rp", "").replace(" ", "")
+    mult = 1
+    if any(x in txt for x in ["jt", "juta"]):
+        mult = 1_000_000
+        txt = re.sub(r"jt|juta", "", txt)
+    elif any(x in txt for x in ["rb", "ribu", "k"]):
+        mult = 1_000
+        txt = re.sub(r"rb|ribu|k", "", txt)
+    if "." in txt and "," in txt:
+        txt = txt.replace(".", "").replace(",", ".")
+    elif "," in txt and "." not in txt:
+        txt = txt.replace(",", ".")
+    elif txt.count(".") > 1:
+        txt = txt.replace(".", "")
+    txt = re.sub(r"[^0-9.]", "", txt)
+    try:
+        return float(txt) * mult if txt else None
+    except Exception:
+        return None
+
+
+def oracle_parse_price_text(text: str) -> Optional[int]:
+    matches = re.findall(r"Rp\s?[0-9][0-9.,]*(?:\s?(?:RB|JT|RIBU|JUTA|K))?", text or "", flags=re.I)
+    values = [oracle_parse_number(x) for x in matches]
+    values = [v for v in values if v is not None and v > 0]
+    return int(min(values)) if values else None
+
+
+def oracle_parse_sold_text(text: str) -> Optional[int]:
+    m = re.search(r"([0-9.,]+)\s*(rb|jt|k|ribu|juta)?\+?\s*(terjual|terbeli)", text or "", flags=re.I)
+    if not m:
+        return None
+    n = oracle_parse_number((m.group(1) or "") + (m.group(2) or ""))
+    return int(n) if n is not None else None
+
+
+def oracle_parse_rating_text(text: str) -> Optional[float]:
+    raw = text or ""
+    # Hindari angka harga seperti Rp87.420 kebaca sebagai rating 4.
+    candidates = re.findall(r"(?<![\d.,])([45](?:[,.]\d)?)(?![\d.,])", raw)
+    for item in candidates:
+        try:
+            value = float(item.replace(",", "."))
+            if 4.0 <= value <= 5.0:
+                return value
+        except Exception:
+            continue
+    return None
+
+
+def oracle_parse_discount_text(text: str) -> Optional[int]:
+    vals = []
+    for m in re.finditer(r"(\d{1,2})\s?%", text or ""):
+        try:
+            vals.append(int(m.group(1)))
+        except Exception:
+            pass
+    return max(vals) if vals else None
+
+
+def oracle_parse_product_ids(url: str) -> Tuple[str, str]:
+    txt = str(url or "")
+    m = re.search(r"-i\.(\d+)\.(\d+)", txt)
+    if m:
+        return m.group(2), m.group(1)
+    m = re.search(r"(?:^|[/?&])i\.(\d+)\.(\d+)", txt)
+    if m:
+        return m.group(2), m.group(1)
+    m = re.search(r"/(?:product|item)/(\d+)/(\d+)", txt)
+    if m:
+        return m.group(2), m.group(1)
+    return str(abs(hash(txt)))[:16], "unknown"
+
+
+def oracle_safe_filename(name: str, suffix: str = ".mp4") -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]+", "_", str(name or "video")).strip("_")
+    safe = safe[:140] or "video"
+    if not safe.lower().endswith((".mp4", ".mov", ".webm", ".m4v", ".m3u8")):
+        safe += suffix
+    return safe
+
+
+def oracle_public_video_path(path: Path) -> str:
+    return "output/videos/" + path.name
+
+
+def oracle_build_start_url(job: Dict[str, Any]) -> str:
+    import json as _json
+    from urllib.parse import quote, urlparse, parse_qsl, urlencode, urlunparse
+    seller_type = (job.get("seller_type") or "any").lower()
+    sort_by = (job.get("sort_by") or "relevance").lower()
+
+    def add_params(url: str) -> str:
+        try:
+            parsed = urlparse(url)
+            query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+            if seller_type == "mall":
+                query["fe_filter_options"] = _json.dumps([{"group_name": "SHOP_TYPE", "values": ["OFFICIAL_MALL"]}], separators=(",", ":"))
+                query["page"] = "0"
+            if sort_by == "sales":
+                query["sortBy"] = "sales"
+            return urlunparse(parsed._replace(query=urlencode(query, doseq=True)))
+        except Exception:
+            return url
+
+    if job.get("search_url"):
+        return add_params(job["search_url"])
+    if job.get("category_url"):
+        return add_params(job["category_url"])
+    keyword = str(job.get("keyword") or "").strip()
+    if keyword:
+        pairs: List[Tuple[str, str]] = []
+        if seller_type == "mall":
+            pairs.append(("fe_filter_options", _json.dumps([{"group_name": "SHOP_TYPE", "values": ["OFFICIAL_MALL"]}], separators=(",", ":"))))
+        pairs.append(("keyword", keyword))
+        pairs.append(("page", "0"))
+        if sort_by == "sales":
+            pairs.append(("sortBy", "sales"))
+        return "https://shopee.co.id/search?" + "&".join(f"{quote(k, safe='')}={quote(v, safe='')}" for k, v in pairs)
+    return "https://shopee.co.id"
+
+
+def oracle_parse_card(raw: Dict[str, Any], category: str = "") -> Optional[Dict[str, Any]]:
+    text = re.sub(r"\s+", " ", str(raw.get("text") or "")).strip()
+    if not text:
+        return None
+    rough_lines = [x.strip() for x in re.split(r"\n|\|", str(raw.get("text") or "")) if x.strip()]
+    name = ""
+    for line in rough_lines:
+        low = line.lower()
+        if "rp" in low or "terjual" in low or "rating" in low or low in {"iklan", "ad"}:
+            continue
+        if len(line) >= 8:
+            name = line
+            break
+    if not name:
+        name = rough_lines[0][:220] if rough_lines else text[:220]
+    price = oracle_parse_price_text(text)
+    sold = raw.get("sold_count")
+    try:
+        sold = int(float(sold)) if sold not in (None, "") else None
+    except Exception:
+        sold = None
+    if sold is None:
+        sold = oracle_parse_sold_text(text)
+    rating = oracle_parse_rating_text(text)
+    product_id, shop_id = oracle_parse_product_ids(raw.get("url") or "")
+    seller_type = str(raw.get("seller_type") or "").strip()[:80]
+    return {
+        "platform": "Shopee",
+        "product_id": product_id,
+        "shop_id": shop_id,
+        "name": name[:500],
+        "url": raw.get("url") or "",
+        "image_url": raw.get("image_url") or "",
+        "price": price,
+        "discount_percent": oracle_parse_discount_text(text),
+        "rating": rating,
+        "sold_count": sold,
+        "category": category or "",
+        "is_ad": bool(raw.get("is_ad")),
+        "seller_type": seller_type,
+        "has_komisixtra": bool(raw.get("has_komisixtra")),
+        "has_video": bool(raw.get("has_video") or raw.get("video_url")),
+        "video_url": raw.get("video_url") or "",
+        "local_video_path": "",
+        "status": "Scanned",
+        "scraped_at": _oracle_utc_iso(),
+    }
+
+
+def oracle_seller_matches(filter_value: str, seller_value: str, job: Dict[str, Any]) -> bool:
+    f = (filter_value or "any").lower()
+    s_value = (seller_value or "").lower()
+    if f in {"", "any", "semua"}:
+        return True
+    if f == "mall" and "official_mall" in oracle_build_start_url(job).lower():
+        return True
+    if f == "mall":
+        return "mall" in s_value or "official" in s_value or "authorized" in s_value
+    if f == "star_plus":
+        return "star_plus" in s_value or "star+" in s_value or "plus" in s_value
+    if f == "star":
+        return "star" in s_value
+    return f in s_value
+
+
+def oracle_filter_product(job: Dict[str, Any], product: Dict[str, Any]) -> Optional[str]:
+    if job.get("require_video") and not product.get("has_video"):
+        return "bukan listing video"
+    if not job.get("include_ads", True) and product.get("is_ad"):
+        return "iklan disembunyikan"
+    if job.get("require_komisixtra") and not product.get("has_komisixtra"):
+        return "bukan KomisiXtra"
+    if job.get("min_rating") is not None and (product.get("rating") is None or float(product.get("rating") or 0) < float(job["min_rating"])):
+        return "rating kurang"
+    if job.get("min_sold") is not None and (product.get("sold_count") is None or int(product.get("sold_count") or 0) < int(job["min_sold"])):
+        return "sold kurang"
+    if job.get("min_price") is not None and (product.get("price") is None or float(product.get("price") or 0) < float(job["min_price"])):
+        return "harga di bawah minimum"
+    if job.get("max_price") is not None and (product.get("price") is None or float(product.get("price") or 0) > float(job["max_price"])):
+        return "harga di atas maksimum"
+    if not oracle_seller_matches(job.get("seller_type", "any"), product.get("seller_type", ""), job):
+        return "tipe penjual tidak cocok"
+    return None
 
 
 def oracle_format_price(value: Any) -> str:
@@ -7903,90 +8169,1305 @@ def oracle_format_price(value: Any) -> str:
     return "Rp{:,.0f}".format(parsed).replace(",", ".")
 
 
-def oracle_extract_product_id_from_action(action: str) -> str:
-    match = re.search(r"/phone/product/(\d+)/", action or "")
-    return match.group(1) if match else ""
+def oracle_get_ready_products(limit: int = 100) -> List[Dict[str, Any]]:
+    state = _oracle_load_state()
+    products = []
+    for product in state.get("products", {}).values():
+        if not product.get("local_video_path"):
+            continue
+        if product.get("status") in {"Uploaded HP", "Upload HP Skip Resolusi"}:
+            continue
+        products.append(product)
+    products.sort(key=lambda p: p.get("scraped_at") or "", reverse=True)
+    return products[:limit]
 
 
-def oracle_parse_phone_html(html_text: str) -> Dict[str, Any]:
-    data: Dict[str, Any] = {
-        "devices": [],
-        "last_status": "Belum ada proses HP.",
-        "logs": "Belum ada log.",
-        "queue_badge": "Idle",
-        "queue_progress": "Queue belum berjalan.",
-        "products": [],
+def oracle_create_scan_job(form_values: Dict[str, Any]) -> Dict[str, Any]:
+    def _fnum(key: str):
+        value = form_values.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            return float(str(value).replace(",", "."))
+        except Exception:
+            return None
+
+    def _inum(key: str):
+        value = form_values.get(key)
+        if value in (None, ""):
+            return None
+        try:
+            return int(float(str(value).replace(",", ".")))
+        except Exception:
+            return None
+
+    def _mut(state):
+        job_id = int(state.get("next_job_id") or 1)
+        state["next_job_id"] = job_id + 1
+        job = {
+            "id": job_id,
+            "keyword": s_clean(form_values.get("keyword")),
+            "search_url": s_clean(form_values.get("search_url")),
+            "category_url": s_clean(form_values.get("category_url")),
+            "max_products": int(form_values.get("max_products") or 30),
+            "max_pages": int(form_values.get("max_pages") or 1),
+            "min_rating": _fnum("min_rating"),
+            "min_sold": _inum("min_sold"),
+            "min_price": _fnum("min_price"),
+            "max_price": _fnum("max_price"),
+            "include_ads": bool(form_values.get("include_ads")),
+            "require_video": bool(form_values.get("require_video")),
+            "download_videos": bool(form_values.get("download_videos")),
+            "sort_by": form_values.get("sort_by") if form_values.get("sort_by") in {"relevance", "sales"} else "relevance",
+            "seller_type": form_values.get("seller_type") if form_values.get("seller_type") in {"any", "mall", "star", "star_plus"} else "any",
+            "require_komisixtra": bool(form_values.get("require_komisixtra")),
+            "status": "Waiting Extension",
+            "total_found": 0,
+            "total_saved": 0,
+            "started_at": _oracle_utc_iso(),
+            "finished_at": None,
+            "error_message": "Job dibuat dari Codex. Extension akan mengambil job otomatis.",
+        }
+        state.setdefault("jobs", {})[str(job_id)] = job
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · Job #{job_id} dibuat: {job.get('keyword') or job.get('search_url') or job.get('category_url')}")
+        del state["logs"][:-80]
+        return job
+    return _oracle_with_state(_mut)
+
+
+def oracle_get_active_job() -> Optional[Dict[str, Any]]:
+    state = _oracle_load_state()
+    jobs = list((state.get("jobs") or {}).values())
+    active = [j for j in jobs if j.get("status") in {"Pending", "Waiting Extension", "Running", "Paused"}]
+    if not active:
+        return None
+    active.sort(key=lambda j: int(j.get("id") or 0), reverse=True)
+    return active[0]
+
+
+def oracle_active_payload() -> Dict[str, Any]:
+    job = oracle_get_active_job()
+    if not job:
+        return {"ok": False, "message": "Belum ada scan aktif. Buat job dari Codex > Oracle > Video Finder."}
+    return {
+        "ok": True,
+        "job_id": job["id"],
+        "keyword": job.get("keyword"),
+        "search_url": job.get("search_url"),
+        "category_url": job.get("category_url"),
+        "start_url": oracle_build_start_url(job),
+        "max_products": job.get("max_products", 30),
+        "max_pages": job.get("max_pages", 1),
+        "require_video": bool(job.get("require_video")),
+        "download_videos": bool(job.get("download_videos")),
+        "sort_by": job.get("sort_by", "relevance"),
+        "seller_type": job.get("seller_type", "any"),
+        "require_komisixtra": bool(job.get("require_komisixtra")),
+        "total_saved": job.get("total_saved", 0),
+        "status": job.get("status"),
     }
-    if not html_text or BeautifulSoup is None:
-        return data
 
-    soup = BeautifulSoup(html_text, "html.parser")
 
-    log_box = soup.select_one("#phoneLogBox")
-    if log_box:
-        data["logs"] = clean_text(log_box.get_text("\n")) or "Belum ada log."
+def oracle_ingest_cards(job_id: int, cards: List[Dict[str, Any]], source_url: str = "") -> Dict[str, Any]:
+    skipped: Dict[str, int] = {}
 
-    cards = soup.select(".card")
-    for card in cards:
-        header = clean_text(card.select_one(".card-header").get_text(" ")) if card.select_one(".card-header") else ""
-        body_text = clean_text(card.get_text(" "))
-        if "Status HP" in header:
-            # Ambil isi list ADB dan status terakhir secara ringan.
-            devices = [clean_text(li.get_text(" ")) for li in card.select("li") if clean_text(li.get_text(" "))]
-            data["devices"] = devices
-            chunks = [x for x in re.split(r"Status terakhir:\s*", body_text, flags=re.I) if x]
-            if len(chunks) >= 2:
-                data["last_status"] = clean_text(chunks[-1]) or data["last_status"]
-        elif "Queue Upload" in header:
-            badge = card.select_one(".badge")
-            if badge:
-                data["queue_badge"] = clean_text(badge.get_text(" ")) or "Idle"
-            # Text setelah Progress biasanya cukup jadi ringkasan.
-            progress_match = re.search(r"Progress:\s*(.*)", body_text, flags=re.I)
-            if progress_match:
-                data["queue_progress"] = clean_text(progress_match.group(0))
+    def _skip(reason: str):
+        skipped[reason] = skipped.get(reason, 0) + 1
 
-    ready_card = None
-    for card in cards:
-        header = clean_text(card.select_one(".card-header").get_text(" ")) if card.select_one(".card-header") else ""
-        if "Produk Siap Upload" in header:
-            ready_card = card
-            break
-
-    products: List[Dict[str, Any]] = []
-    if ready_card:
-        for tr in ready_card.select("tbody tr"):
-            cols = tr.find_all("td")
-            if len(cols) < 5:
+    def _mut(state):
+        jobs = state.setdefault("jobs", {})
+        products = state.setdefault("products", {})
+        job = jobs.get(str(job_id))
+        if not job:
+            return {"ok": False, "message": "Job tidak ditemukan."}
+        job["status"] = "Running"
+        found = len(cards or [])
+        saved = 0
+        out_products: List[Dict[str, Any]] = []
+        existing_keys = {(p.get("platform"), p.get("product_id"), p.get("shop_id")): pid for pid, p in products.items()}
+        job_product_count = sum(1 for p in products.values() if int(p.get("scan_job_id") or 0) == int(job_id))
+        for raw in cards or []:
+            parsed = oracle_parse_card(raw, category=job.get("category_url") or source_url or "")
+            if not parsed:
+                _skip("kartu tidak terbaca")
                 continue
-            product_cell = cols[0]
-            img = product_cell.find("img")
-            video_link = cols[2].find("a")
-            detail_link = None
-            for a in cols[4].find_all("a"):
-                if "Detail" in clean_text(a.get_text(" ")):
-                    detail_link = a
-                    break
-            first_form = cols[4].find("form")
-            product_id = oracle_extract_product_id_from_action(first_form.get("action", "") if first_form else "")
-            products.append({
-                "id": product_id,
-                "name": clean_text(product_cell.get_text(" ")),
-                "image": img.get("src") if img else "",
-                "price": clean_text(cols[1].get_text(" ")),
-                "video_href": video_link.get("href") if video_link else "",
-                "status": clean_text(cols[3].get_text(" ")),
-                "detail_href": detail_link.get("href") if detail_link else "",
+            if job_product_count >= int(job.get("max_products") or 30):
+                _skip("target produk tercapai")
+                continue
+            reason = oracle_filter_product(job, parsed)
+            if reason:
+                _skip(reason)
+                continue
+            key = (parsed.get("platform"), parsed.get("product_id"), parsed.get("shop_id"))
+            product_id = existing_keys.get(key)
+            if product_id:
+                product = products[str(product_id)]
+                product.update({k: v for k, v in parsed.items() if v not in (None, "")})
+            else:
+                product_id = int(state.get("next_product_id") or 1)
+                state["next_product_id"] = product_id + 1
+                parsed["id"] = product_id
+                parsed["scan_job_id"] = job_id
+                products[str(product_id)] = parsed
+                existing_keys[key] = product_id
+                product = parsed
+                saved += 1
+                job_product_count += 1
+            out_products.append({
+                "id": int(product_id),
+                "name": product.get("name"),
+                "url": product.get("url"),
+                "local_video_path": product.get("local_video_path") or "",
             })
-    data["products"] = products
-    return data
+        job["total_found"] = int(job.get("total_found") or 0) + found
+        job["total_saved"] = sum(1 for p in products.values() if int(p.get("scan_job_id") or 0) == int(job_id))
+        if skipped:
+            job["error_message"] = "Catatan filter: " + ", ".join(f"{k}: {v}" for k, v in sorted(skipped.items(), key=lambda x: -x[1])[:6])
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · Job #{job_id} ingest: found {found}, saved baru {saved}, total {job['total_saved']}")
+        del state["logs"][:-80]
+        return {
+            "ok": True,
+            "found": found,
+            "saved": saved,
+            "total_saved": job["total_saved"],
+            "skipped": skipped,
+            "status": job["status"],
+            "products": out_products,
+        }
+    return _oracle_with_state(_mut)
 
 
-def oracle_fetch_phone_state() -> Dict[str, Any]:
-    res = oracle_http_request("GET", "/phone", timeout=3, allow_redirects=True)
+def oracle_finish_job(job_id: int, ok: bool = True, message: str = "") -> Dict[str, Any]:
+    def _mut(state):
+        job = state.setdefault("jobs", {}).get(str(job_id))
+        if not job:
+            return {"ok": False, "message": "Job tidak ditemukan."}
+        if job.get("status") != "Stopped":
+            job["status"] = "Completed" if ok else "Failed"
+            job["finished_at"] = _oracle_utc_iso()
+            prev = (job.get("error_message") or "").strip()
+            final = s_clean(message) or ("Scan otomatis selesai." if ok else "Scan otomatis gagal.")
+            if prev and prev not in final and any(x in prev.lower() for x in ["filter:", "catatan"]):
+                final += "\n\nDiagnosa: " + prev
+            job["error_message"] = final
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · Job #{job_id} selesai: {job.get('status')} · {job.get('error_message') or ''}")
+        del state["logs"][:-80]
+        return {"ok": True, "status": job.get("status"), "message": job.get("error_message")}
+    return _oracle_with_state(_mut)
+
+
+def oracle_mark_product_video(product_id: int, video_path: str, source_url: str = "", video_url: str = "") -> Dict[str, Any]:
+    def _mut(state):
+        product = state.setdefault("products", {}).get(str(product_id))
+        if not product:
+            return {"ok": False, "message": "Produk tidak ditemukan."}
+        product["local_video_path"] = video_path
+        product["video_url"] = video_url or product.get("video_url") or ""
+        product["status"] = "Video Downloaded"
+        product["updated_at"] = _oracle_utc_iso()
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · Video produk #{product_id} tersimpan: {video_path}")
+        del state["logs"][:-80]
+        return {"ok": True, "product_id": product_id, "video_path": video_path, "message": "Video tersimpan."}
+    return _oracle_with_state(_mut)
+
+
+def oracle_download_video_url(product_id: int, video_url: str, source_url: str = "") -> Dict[str, Any]:
+    if not requests:
+        return {"ok": False, "message": "Package requests belum tersedia untuk server download."}
+    if not video_url:
+        return {"ok": False, "message": "Video URL kosong."}
+    try:
+        product_name = str(product_id)
+        state = _oracle_load_state()
+        product = state.get("products", {}).get(str(product_id)) or {}
+        if product.get("name"):
+            product_name = f"product_{product_id}_{product.get('name')}"
+        filename = oracle_safe_filename(product_name, ".mp4")
+        dest = ORACLE_VIDEO_DIR / filename
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; CodexOracle/1.0)"}
+        with requests.get(video_url, headers=headers, stream=True, timeout=55) as resp:
+            resp.raise_for_status()
+            with dest.open("wb") as fh:
+                total = 0
+                for chunk in resp.iter_content(chunk_size=1024 * 256):
+                    if not chunk:
+                        continue
+                    fh.write(chunk)
+                    total += len(chunk)
+                    if total > 80 * 1024 * 1024:
+                        raise RuntimeError("Video terlalu besar, dihentikan di 80MB.")
+        if dest.stat().st_size < 20_000:
+            return {"ok": False, "message": "File video terlalu kecil."}
+        return oracle_mark_product_video(product_id, oracle_public_video_path(dest), source_url, video_url)
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def oracle_save_uploaded_video(product_id: int, filename: str, content: bytes, source_url: str = "", video_url: str = "") -> Dict[str, Any]:
+    try:
+        if not content or len(content) < 20_000:
+            return {"ok": False, "message": "File video kosong / terlalu kecil."}
+        safe = oracle_safe_filename(f"source_product_{product_id}_{filename or 'video.mp4'}", ".mp4")
+        dest = ORACLE_VIDEO_DIR / safe
+        with dest.open("wb") as fh:
+            fh.write(content)
+        return oracle_mark_product_video(product_id, oracle_public_video_path(dest), source_url, video_url)
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+
+# ============================================================
+# ORACLE - PHONE / ADB AUTOMATION (EMBEDDED)
+# ============================================================
+# Bagian ini memindahkan phone_service Oracle lama ke dalam Codex.
+# UI dan fitur Codex lain tidak disentuh. Chrome extension tetap load manual,
+# sedangkan upload HP berjalan melalui ADB di komputer/server yang menjalankan Codex.
+
+ORACLE_PHONE_DIR = "/sdcard/Movies/OracleUpload"
+ORACLE_PHONE_ARCHIVE_DIR = "/sdcard/Movies/OracleUploaded"
+ORACLE_TERMINAL_UPLOAD_STATUSES = {"Uploaded HP", "Upload HP Skip Resolusi"}
+
+
+def oracle_adb_result(ok: bool, message: str, output: str = "") -> Dict[str, Any]:
+    return {"ok": bool(ok), "message": str(message or ""), "output": str(output or "")}
+
+
+def oracle_phone_log(message: str, ok: Optional[bool] = None) -> None:
+    def _mut(state):
+        now = _oracle_now_text()
+        phone_status = state.setdefault("phone_status", {})
+        phone_status["last_message"] = str(message or "")
+        phone_status["last_ok"] = ok
+        phone_status["updated_at"] = now
+        line = f"{now} · {str(message or '').strip()}"
+        state.setdefault("logs", []).append(line)
+        del state["logs"][:-120]
+    _oracle_with_state(_mut)
+
+
+def oracle_clear_phone_logs() -> Dict[str, Any]:
+    def _mut(state):
+        now = _oracle_now_text()
+        state["logs"] = [f"{now} · Log HP dibersihkan."]
+        state["phone_status"] = {"last_message": "Log HP dibersihkan.", "last_ok": True, "updated_at": now}
+        return {"ok": True, "message": "Log HP dibersihkan."}
+    return _oracle_with_state(_mut)
+
+
+def oracle_find_adb() -> Optional[str]:
+    import shutil as _shutil
+    candidates: List[str] = []
+    env_path = os.environ.get("ORACLE_ADB_PATH") or os.environ.get("CODEX_ADB_PATH")
+    if env_path:
+        candidates.append(env_path)
+    roots: List[Path] = [Path.cwd(), ORACLE_EMBEDDED_ROOT]
+    try:
+        roots.append(Path(__file__).resolve().parent)
+    except Exception:
+        pass
+    for root in roots:
+        candidates.extend([
+            str(root / "platform-tools" / "adb.exe"),
+            str(root / "platform-tools" / "adb"),
+            str(root / "adb" / "adb.exe"),
+            str(root / "adb" / "adb"),
+        ])
+    candidates.extend([
+        str(Path.home() / "AppData" / "Local" / "Android" / "Sdk" / "platform-tools" / "adb.exe"),
+        "adb",
+        "adb.exe",
+    ])
+    seen: Set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if candidate in {"adb", "adb.exe"}:
+            found = _shutil.which(candidate)
+            if found:
+                return found
+        elif Path(candidate).exists():
+            return candidate
+    return None
+
+
+def oracle_adb_run(args: Any, timeout: int = 30, device_id: Optional[str] = None) -> Dict[str, Any]:
+    import subprocess as _subprocess
+    adb = oracle_find_adb()
+    if not adb:
+        return oracle_adb_result(
+            False,
+            "ADB belum ketemu. Taruh folder platform-tools di folder repo Codex, atau set ORACLE_ADB_PATH ke adb.exe, atau install Android platform-tools ke PATH.",
+        )
+    cmd = [adb]
+    if device_id:
+        cmd += ["-s", str(device_id)]
+    cmd += [str(x) for x in list(args)]
+    try:
+        proc = _subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace")
+        out_text = (proc.stdout or "") + (proc.stderr or "")
+        if proc.returncode != 0:
+            return oracle_adb_result(False, out_text.strip() or f"ADB error code {proc.returncode}", out_text)
+        return oracle_adb_result(True, out_text.strip() or "OK", out_text)
+    except _subprocess.TimeoutExpired:
+        return oracle_adb_result(False, "ADB timeout. Cek kabel USB, izin debugging di HP, dan layar HP jangan terkunci.")
+    except Exception as exc:
+        return oracle_adb_result(False, str(exc))
+
+
+def oracle_adb_shell(command: str, timeout: int = 30, device_id: Optional[str] = None) -> Dict[str, Any]:
+    # Kirim sebagai satu string supaya URL Shopee yang mengandung &, ?, (, ) tidak pecah di shell Android.
+    return oracle_adb_run(["shell", str(command)], timeout=timeout, device_id=device_id)
+
+
+def oracle_list_devices() -> List[Dict[str, str]]:
+    res = oracle_adb_run(["devices"], timeout=12)
     if not res.get("ok"):
-        return {"ok": False, "message": res.get("message") or f"Oracle /phone tidak bisa dibaca. HTTP {res.get('status_code')}", "data": oracle_parse_phone_html("")}
-    return {"ok": True, "message": "OK", "data": oracle_parse_phone_html(res.get("text") or "")}
+        return [{"id": "", "status": "error", "label": res.get("message") or "ADB error"}]
+    rows: List[Dict[str, str]] = []
+    for line in str(res.get("output") or "").splitlines()[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 2:
+            rows.append({"id": parts[0], "status": parts[1], "label": f"{parts[0]} · {parts[1]}"})
+    if not rows:
+        rows.append({"id": "", "status": "none", "label": "Tidak ada perangkat terbaca."})
+    return rows
+
+
+def oracle_product_video_path(product: Dict[str, Any]) -> Optional[Path]:
+    raw = str(product.get("local_video_path") or "").replace("\\", "/")
+    if not raw:
+        return None
+    candidates: List[Path] = []
+    raw_path = Path(raw)
+    if raw_path.is_absolute():
+        candidates.append(raw_path)
+    candidates.extend([
+        ORACLE_EMBEDDED_ROOT / raw.lstrip("/"),
+        ORACLE_VIDEO_DIR / Path(raw).name,
+        Path.cwd() / raw.lstrip("/"),
+    ])
+    try:
+        candidates.append(Path(__file__).resolve().parent / raw.lstrip("/"))
+    except Exception:
+        pass
+    for path in candidates:
+        try:
+            if path.exists() and path.is_file():
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def oracle_latest_caption(product: Dict[str, Any]) -> str:
+    caption = s_clean(product.get("caption") or product.get("caption_text"))
+    if caption:
+        return caption
+    price = oracle_format_price(product.get("price")) if product.get("price") not in (None, "") else ""
+    name = s_clean(product.get("name"))[:90]
+    return f"{name} {price}\nCek keranjang kuning sebelum promo berubah. #shopeeaffiliate #racunshopee".strip()
+
+
+def oracle_safe_remote_name(path: Path) -> str:
+    name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", path.name)
+    if not name.lower().endswith((".mp4", ".mov", ".webm", ".m4v")):
+        name += ".mp4"
+    return name[:120]
+
+
+def oracle_active_remote_name(product: Dict[str, Any], local_path: Path) -> str:
+    base = oracle_safe_remote_name(local_path)
+    stem = Path(base).stem[:80]
+    suffix = Path(base).suffix or ".mp4"
+    return f"ORACLE_ACTIVE_{product.get('id')}_{stem}{suffix}"
+
+
+def oracle_screen_size(device_id: Optional[str] = None) -> Tuple[int, int]:
+    res = oracle_adb_run(["shell", "wm", "size"], timeout=10, device_id=device_id)
+    if res.get("ok"):
+        m = re.search(r"(\d+)x(\d+)", str(res.get("output") or ""))
+        if m:
+            return int(m.group(1)), int(m.group(2))
+    return 720, 1600
+
+
+def oracle_tap_pct(x_pct: float, y_pct: float, device_id: Optional[str] = None, pause: float = 0.6) -> None:
+    w, h = oracle_screen_size(device_id)
+    oracle_adb_run(["shell", "input", "tap", str(int(w * x_pct)), str(int(h * y_pct))], timeout=8, device_id=device_id)
+    time.sleep(pause)
+
+
+def oracle_tap_pct_logged(label: str, x_pct: float, y_pct: float, device_id: Optional[str] = None, pause: float = 0.8) -> None:
+    oracle_phone_log(f"Auto Upload HP: {label}", None)
+    oracle_tap_pct(x_pct, y_pct, device_id=device_id, pause=pause)
+
+
+def oracle_adb_text(text: str) -> str:
+    text = str(text or "").replace("\n", " ")
+    text = re.sub(r"[^0-9A-Za-z #@._,:%/+-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text[:180].replace(" ", "%s")
+
+
+def oracle_parse_bounds(bounds: str) -> Optional[Tuple[int, int]]:
+    m = re.match(r"\[(\d+),(\d+)\]\[(\d+),(\d+)\]", bounds or "")
+    if not m:
+        return None
+    x1, y1, x2, y2 = map(int, m.groups())
+    return (x1 + x2) // 2, (y1 + y2) // 2
+
+
+def oracle_dump_ui_xml(device_id: Optional[str] = None) -> str:
+    remote = "/sdcard/oracle_ui.xml"
+    oracle_adb_run(["shell", "uiautomator", "dump", remote], timeout=10, device_id=device_id)
+    res = oracle_adb_run(["shell", "cat", remote], timeout=10, device_id=device_id)
+    if not res.get("ok"):
+        return ""
+    return str(res.get("output") or "")
+
+
+def oracle_tap_text_logged(
+    label: str,
+    patterns: List[str],
+    fallback: Optional[Tuple[float, float]],
+    device_id: Optional[str] = None,
+    pause: float = 1.0,
+    prefer_bottom: bool = False,
+) -> bool:
+    import xml.etree.ElementTree as _ET
+    oracle_phone_log(f"Auto Upload HP: {label}", None)
+    xml = oracle_dump_ui_xml(device_id=device_id)
+    matches: List[Tuple[int, int, str]] = []
+    if xml:
+        try:
+            root = _ET.fromstring(xml)
+            low_patterns = [str(p).lower() for p in patterns]
+            for node in root.iter("node"):
+                joined = " ".join([
+                    node.attrib.get("text", ""),
+                    node.attrib.get("content-desc", ""),
+                    node.attrib.get("resource-id", ""),
+                ]).strip()
+                if not joined:
+                    continue
+                low = joined.lower()
+                if any(p in low for p in low_patterns):
+                    center = oracle_parse_bounds(node.attrib.get("bounds", ""))
+                    if center:
+                        matches.append((center[0], center[1], joined))
+        except Exception:
+            matches = []
+    if matches:
+        x, y, _ = sorted(matches, key=lambda item: item[1])[-1] if prefer_bottom else matches[0]
+        oracle_adb_run(["shell", "input", "tap", str(x), str(y)], timeout=8, device_id=device_id)
+        time.sleep(pause)
+        return True
+    if fallback:
+        oracle_tap_pct(fallback[0], fallback[1], device_id=device_id, pause=pause)
+        return False
+    time.sleep(pause)
+    return False
+
+
+def oracle_ui_text_blob(device_id: Optional[str] = None) -> str:
+    import xml.etree.ElementTree as _ET
+    xml = oracle_dump_ui_xml(device_id=device_id)
+    if not xml:
+        return ""
+    try:
+        root = _ET.fromstring(xml)
+    except Exception:
+        return xml.lower()
+    parts: List[str] = []
+    for node in root.iter("node"):
+        parts.append(node.attrib.get("text", ""))
+        parts.append(node.attrib.get("content-desc", ""))
+        parts.append(node.attrib.get("resource-id", ""))
+    return " ".join(x for x in parts if x).lower()
+
+
+def oracle_upload_rejection_reason(device_id: Optional[str] = None) -> Optional[str]:
+    blob = oracle_ui_text_blob(device_id=device_id)
+    if not blob:
+        return None
+    checks = [
+        ("resolusi", "resolusi video ditolak"),
+        ("resolution", "resolusi video ditolak"),
+        ("terlalu rendah", "kualitas/resolusi video terlalu rendah"),
+        ("format", "format video tidak didukung"),
+        ("tidak didukung", "video tidak didukung"),
+        ("tidak dapat", "video tidak dapat dipakai"),
+        ("gagal memproses", "video gagal diproses"),
+        ("pilih video lain", "Shopee meminta pilih video lain"),
+        ("terlalu besar", "ukuran video terlalu besar"),
+        ("durasi", "durasi video tidak sesuai"),
+        ("minimum", "syarat minimum video tidak terpenuhi"),
+        ("maksimum", "syarat maksimum video terlampaui"),
+    ]
+    for needle, reason in checks:
+        if needle in blob:
+            if needle == "durasi" and "pilih musik" in blob and "posting" in blob:
+                continue
+            return reason
+    return None
+
+
+def oracle_make_skip_result(reason: str, label: str, device_id: Optional[str] = None) -> Dict[str, Any]:
+    msg = f"SKIP_NEXT: {reason}. Oracle skip produk ini dan lanjut produk berikutnya."
+    oracle_phone_log(msg, False)
+    return oracle_adb_result(False, msg, "SKIP_NEXT_RESOLUTION")
+
+
+def oracle_abort_if_video_rejected(label: str, device_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    reason = oracle_upload_rejection_reason(device_id=device_id)
+    if reason:
+        return oracle_make_skip_result(f"Video ditolak Shopee ({reason})", label, device_id=device_id)
+    return None
+
+
+def oracle_skip_if_stuck_after_gallery_next(label: str, device_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    blob = oracle_ui_text_blob(device_id=device_id)
+    if blob and "galeri" in blob and "lanjutkan" in blob and ("dipilih" in blob or "semua" in blob):
+        return oracle_make_skip_result("Video masih tertahan di Galeri setelah klik Lanjutkan, kemungkinan resolusi/format ditolak", label, device_id=device_id)
+    return None
+
+
+def oracle_force_tap_caption_field(device_id: Optional[str] = None) -> None:
+    oracle_tap_pct(0.58, 0.125, device_id=device_id, pause=0.9)
+
+
+def oracle_tap_posting_button(device_id: Optional[str] = None, pause: float = 7.0) -> None:
+    clicked_by_text = oracle_tap_text_logged(
+        "klik Posting",
+        ["Posting"],
+        fallback=None,
+        device_id=device_id,
+        pause=0.6,
+        prefer_bottom=True,
+    )
+    if not clicked_by_text:
+        oracle_tap_pct_logged("klik Posting pakai koordinat bawah", 0.50, 0.925, device_id, pause=0.6)
+    time.sleep(pause)
+
+
+def oracle_clear_active_phone_video_folder(device_id: Optional[str] = None) -> Dict[str, Any]:
+    import shlex as _shlex
+    cmd = (
+        f"mkdir -p {_shlex.quote(ORACLE_PHONE_DIR)}; "
+        f"rm -f {_shlex.quote(ORACLE_PHONE_DIR)}/* 2>/dev/null || true"
+    )
+    res = oracle_adb_shell(cmd, timeout=15, device_id=device_id)
+    if not res.get("ok"):
+        return res
+    oracle_adb_shell(
+        "content delete --uri content://media/external/video/media "
+        "--where \"_data LIKE '/storage/emulated/0/Movies/OracleUpload/%'\" >/dev/null 2>&1 || true",
+        timeout=10,
+        device_id=device_id,
+    )
+    return oracle_adb_result(True, "Folder OracleUpload di HP sudah dikosongkan.")
+
+
+def oracle_push_video_to_phone(product: Dict[str, Any], device_id: Optional[str] = None) -> Dict[str, Any]:
+    import shlex as _shlex
+    local_path = oracle_product_video_path(product)
+    if not local_path:
+        return oracle_adb_result(False, "Video lokal produk belum ketemu. Pastikan video sudah berhasil didownload dan tombol Open Video muncul.")
+    cleared = oracle_clear_active_phone_video_folder(device_id=device_id)
+    if not cleared.get("ok"):
+        oracle_phone_log(cleared.get("message") or "Gagal membersihkan folder OracleUpload.", False)
+        return cleared
+    remote_path = f"{ORACLE_PHONE_DIR}/{oracle_active_remote_name(product, local_path)}"
+    res = oracle_adb_run(["shell", "mkdir", "-p", ORACLE_PHONE_DIR], timeout=10, device_id=device_id)
+    if not res.get("ok"):
+        oracle_phone_log(res.get("message") or "Gagal membuat folder OracleUpload.", False)
+        return res
+    res = oracle_adb_run(["push", str(local_path), remote_path], timeout=180, device_id=device_id)
+    if not res.get("ok"):
+        oracle_phone_log(res.get("message") or "Gagal push video ke HP.", False)
+        return res
+    oracle_adb_shell(f"touch {_shlex.quote(remote_path)}; chmod 0644 {_shlex.quote(remote_path)}", timeout=10, device_id=device_id)
+    file_uri = f"file://{remote_path}"
+    oracle_adb_shell(
+        f"am broadcast -a android.intent.action.MEDIA_SCANNER_SCAN_FILE -d {_shlex.quote(file_uri)}",
+        timeout=15,
+        device_id=device_id,
+    )
+    oracle_adb_shell(
+        f"cmd media scan --file {_shlex.quote(remote_path)} >/dev/null 2>&1 || true",
+        timeout=10,
+        device_id=device_id,
+    )
+    msg = f"Mode Aman: hanya 1 video aktif di HP untuk produk #{product.get('id')}: {remote_path}"
+    oracle_phone_log(msg, True)
+    return oracle_adb_result(True, f"Video pasangan produk sudah jadi satu-satunya video aktif Oracle di HP: {remote_path}", remote_path)
+
+
+def oracle_open_product_on_phone(product: Dict[str, Any], device_id: Optional[str] = None) -> Dict[str, Any]:
+    import shlex as _shlex
+    url = s_clean(product.get("url"))
+    if not url:
+        return oracle_adb_result(False, "Produk belum punya URL Shopee.")
+    res = oracle_adb_shell(
+        f"am start -a android.intent.action.VIEW -d {_shlex.quote(url)}",
+        timeout=20,
+        device_id=device_id,
+    )
+    if not res.get("ok"):
+        oracle_phone_log(res.get("message") or "Gagal membuka URL produk di HP.", False)
+        return res
+    oracle_phone_log(f"Produk dibuka di HP: {s_clean(product.get('name'))[:80]}", True)
+    return oracle_adb_result(True, "Produk sudah dibuka di HP. Kalau Shopee minta pilihan app, pilih Shopee dan Always.")
+
+
+def oracle_send_to_phone(product: Dict[str, Any], device_id: Optional[str] = None) -> Dict[str, Any]:
+    pushed = oracle_push_video_to_phone(product, device_id=device_id)
+    if not pushed.get("ok"):
+        return pushed
+    opened = oracle_open_product_on_phone(product, device_id=device_id)
+    if not opened.get("ok"):
+        return opened
+    msg = "Video sudah masuk galeri HP dan listing Shopee sudah dibuka. Lanjutkan upload dari HP, atau pakai Auto Upload."
+    oracle_phone_log(msg, True)
+    return oracle_adb_result(True, msg, pushed.get("output") or "")
+
+
+def oracle_auto_upload_from_phone(product: Dict[str, Any], caption: str, device_id: Optional[str] = None, post_now: bool = True) -> Dict[str, Any]:
+    started = oracle_send_to_phone(product, device_id=device_id)
+    if not started.get("ok"):
+        return started
+
+    oracle_phone_log("Auto Upload HP mulai. Jangan sentuh HP dulu.", None)
+    time.sleep(4.0)
+
+    oracle_tap_pct_logged("klik ikon share produk", 0.735, 0.075, device_id, pause=1.8)
+
+    oracle_tap_text_logged(
+        "klik Komisi Affiliate",
+        ["Komisi Affiliate", "Komisi Afiliasi", "Affiliate"],
+        fallback=(0.50, 0.64),
+        device_id=device_id,
+        pause=2.5,
+    )
+
+    oracle_tap_text_logged(
+        "klik Bagikan & Dapatkan Komisi",
+        ["Bagikan & Dapatkan Komisi", "Bagikan dan Dapatkan Komisi", "Dapatkan Komisi"],
+        fallback=(0.75, 0.945),
+        device_id=device_id,
+        pause=1.8,
+        prefer_bottom=True,
+    )
+
+    oracle_tap_text_logged(
+        "pilih Shopee Video",
+        ["Shopee Video"],
+        fallback=(0.14, 0.745),
+        device_id=device_id,
+        pause=3.5,
+    )
+
+    oracle_tap_text_logged(
+        "klik tab Video",
+        ["Video"],
+        fallback=(0.31, 0.902),
+        device_id=device_id,
+        pause=1.6,
+        prefer_bottom=True,
+    )
+
+    oracle_tap_text_logged(
+        "buka Galeri",
+        ["Galeri", "Gallery"],
+        fallback=(0.80, 0.775),
+        device_id=device_id,
+        pause=2.5,
+        prefer_bottom=True,
+    )
+
+    oracle_tap_text_logged(
+        "filter Galeri ke tab Video",
+        ["Video"],
+        fallback=(0.50, 0.132),
+        device_id=device_id,
+        pause=1.1,
+    )
+
+    oracle_tap_pct_logged("pilih video terbaru dari Galeri", 0.18, 0.205, device_id, pause=1.2)
+    rejected = oracle_abort_if_video_rejected("08_video_dipilih", device_id=device_id)
+    if rejected:
+        return rejected
+
+    oracle_tap_text_logged(
+        "lanjut dari Galeri",
+        ["Lanjutkan"],
+        fallback=(0.83, 0.837),
+        device_id=device_id,
+        pause=5.5,
+        prefer_bottom=True,
+    )
+    rejected = oracle_abort_if_video_rejected("09_preview_video", device_id=device_id) or oracle_skip_if_stuck_after_gallery_next("09_preview_video", device_id=device_id)
+    if rejected:
+        return rejected
+
+    oracle_tap_text_logged(
+        "lanjut dari Preview",
+        ["Lanjutkan"],
+        fallback=(0.86, 0.912),
+        device_id=device_id,
+        pause=4.0,
+        prefer_bottom=True,
+    )
+    time.sleep(1.5)
+
+    oracle_force_tap_caption_field(device_id=device_id)
+    txt = oracle_adb_text(caption)
+    if txt:
+        oracle_phone_log("Auto Upload HP: input caption", None)
+        oracle_adb_run(["shell", "input", "text", txt], timeout=12, device_id=device_id)
+        time.sleep(0.7)
+        oracle_adb_run(["shell", "input", "keyevent", "KEYCODE_BACK"], timeout=6, device_id=device_id)
+        time.sleep(0.8)
+
+    if post_now:
+        oracle_tap_posting_button(device_id=device_id, pause=8.0)
+        msg = "Auto Upload HP selesai dikirim. Cek Shopee Video di HP untuk memastikan statusnya berhasil."
+    else:
+        msg = "Mode Test selesai sampai halaman Posting. Cek video/caption di HP. Kalau sudah benar, pakai Auto Upload + Posting."
+    oracle_phone_log(msg, True)
+    return oracle_adb_result(True, msg)
+
+
+def oracle_update_product_status(product_id: int, status: str) -> None:
+    def _mut(state):
+        product = state.setdefault("products", {}).get(str(product_id))
+        if product:
+            product["status"] = status
+            product["updated_at"] = _oracle_utc_iso()
+    _oracle_with_state(_mut)
+
+
+def oracle_get_product(product_id: int) -> Optional[Dict[str, Any]]:
+    product = (_oracle_load_state().get("products") or {}).get(str(product_id))
+    return dict(product) if product else None
+
+
+def oracle_queue_status(message: str, **extra) -> None:
+    def _mut(state):
+        queue = state.setdefault("queue", {})
+        queue["last_message"] = message
+        queue["updated_at"] = _oracle_now_text()
+        for key, value in extra.items():
+            queue[key] = value
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · {message}")
+        del state["logs"][:-120]
+    _oracle_with_state(_mut)
+
+
+def oracle_queue_is_stop_requested() -> bool:
+    queue = (_oracle_load_state().get("queue") or {})
+    return bool(queue.get("stop_requested"))
+
+
+def oracle_queue_worker(product_ids: List[int], device_id: Optional[str], post_now: bool, interval_min: int, interval_max: int) -> None:
+    import random as _random
+    interval_min = max(1, min(int(interval_min), 180))
+    interval_max = max(1, min(int(interval_max), 180))
+    if interval_max < interval_min:
+        interval_min, interval_max = interval_max, interval_min
+    oracle_queue_status(
+        f"Queue Mode Aman mulai. Jeda aktif: {interval_min} menit. Jeda dihitung setelah 1 produk selesai.",
+        running=True,
+        stop_requested=False,
+        total=len(product_ids),
+        done=0,
+        interval_min=interval_min,
+        interval_max=interval_max,
+        next_wait_minutes=None,
+        next_run_at=None,
+    )
+    try:
+        for index, product_id in enumerate(product_ids, start=1):
+            if oracle_queue_is_stop_requested():
+                oracle_queue_status("Queue dihentikan user.", running=False, current_product_id=None, next_wait_minutes=None, next_run_at=None)
+                return
+            product = oracle_get_product(product_id)
+            if not product or not product.get("local_video_path"):
+                oracle_queue_status(f"Lewati produk #{product_id}: video lokal tidak ada.", done=index - 1)
+                continue
+            if (product.get("status") or "") in ORACLE_TERMINAL_UPLOAD_STATUSES:
+                oracle_queue_status(f"Lewati produk #{product_id}: status sudah {product.get('status')}.", done=index - 1)
+                continue
+            oracle_queue_status(
+                f"Upload {index}/{len(product_ids)}: produk #{product_id}. Mode Aman mengirim 1 video aktif saja.",
+                current_product_id=product_id,
+                next_wait_minutes=None,
+                next_run_at=None,
+            )
+            caption = oracle_latest_caption(product)
+            res = oracle_auto_upload_from_phone(product, caption=caption, device_id=device_id, post_now=post_now)
+            if not res.get("ok"):
+                joined = (res.get("output") or "") + " " + (res.get("message") or "")
+                if "SKIP_NEXT" in joined:
+                    oracle_update_product_status(product_id, "Upload HP Skip Resolusi")
+                    oracle_queue_status(
+                        f"Skip {index}/{len(product_ids)}: produk #{product_id}. Video ditolak/mentok, lanjut produk berikutnya tanpa jeda.",
+                        done=index,
+                        current_product_id=None,
+                        next_wait_minutes=None,
+                        next_run_at=None,
+                    )
+                    continue
+                oracle_update_product_status(product_id, "Upload HP Gagal")
+                oracle_queue_status(
+                    f"Queue berhenti karena gagal di produk #{product_id}: {res.get('message')}",
+                    running=False,
+                    done=index - 1,
+                    current_product_id=None,
+                    next_wait_minutes=None,
+                    next_run_at=None,
+                )
+                return
+            oracle_update_product_status(product_id, "Uploaded HP" if post_now else "Upload HP Tested")
+            oracle_queue_status(f"Berhasil {index}/{len(product_ids)}: produk #{product_id}.", done=index)
+            if index < len(product_ids):
+                wait_minutes = _random.randint(interval_min, interval_max)
+                next_ts = time.time() + wait_minutes * 60
+                next_text = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(next_ts))
+                oracle_queue_status(
+                    f"Menunggu {wait_minutes} menit sebelum produk berikutnya. Stop bisa ditekan kapan saja.",
+                    next_wait_minutes=wait_minutes,
+                    next_run_at=next_text,
+                    current_product_id=None,
+                )
+                for _ in range(wait_minutes * 60):
+                    if oracle_queue_is_stop_requested():
+                        oracle_queue_status("Queue dihentikan user saat jeda.", running=False, current_product_id=None, next_wait_minutes=None, next_run_at=None)
+                        return
+                    time.sleep(1)
+        oracle_queue_status("Queue Mode Aman selesai.", running=False, current_product_id=None, next_wait_minutes=None, next_run_at=None)
+    except Exception as exc:
+        oracle_queue_status(f"Queue error: {exc}", running=False, current_product_id=None, next_wait_minutes=None, next_run_at=None)
+
+
+def oracle_start_safe_upload_queue(max_items: int = 30, device_id: Optional[str] = None, post_now: bool = False, interval_min: int = 20, interval_max: int = 40) -> Dict[str, Any]:
+    import threading as _threading
+    state = _oracle_load_state()
+    queue = state.get("queue", {}) or {}
+    if queue.get("running"):
+        active = f"{queue.get('interval_min') or queue.get('interval_minutes') or interval_min} menit"
+        return oracle_adb_result(False, f"Queue masih berjalan dengan jeda aktif {active}. Tekan Stop dulu kalau ingin mulai ulang.")
+    products = oracle_get_ready_products(1000)
+    clean_ids = [int(p.get("id")) for p in products if p.get("id")][: max(1, min(int(max_items or 30), 30))]
+    if not clean_ids:
+        return oracle_adb_result(False, "Tidak ada produk yang bisa masuk queue.")
+    interval_min = max(1, min(int(interval_min or 20), 180))
+    interval_max = max(1, min(int(interval_max or interval_min), 180))
+    def _mut(state):
+        queue = state.setdefault("queue", {})
+        queue.update({
+            "running": True,
+            "stop_requested": False,
+            "total": len(clean_ids),
+            "done": 0,
+            "interval_min": interval_min,
+            "interval_max": interval_max,
+            "interval_minutes": interval_min,
+            "post_now": post_now,
+            "next_wait_minutes": None,
+            "next_run_at": None,
+            "last_message": f"Queue Mode Aman dimulai untuk {len(clean_ids)} produk. Jeda aktif: {interval_min} menit.",
+            "updated_at": _oracle_now_text(),
+        })
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · {queue['last_message']}")
+        del state["logs"][:-120]
+    _oracle_with_state(_mut)
+    thread = _threading.Thread(target=oracle_queue_worker, args=(clean_ids, device_id, post_now, interval_min, interval_max), daemon=True)
+    thread.start()
+    return oracle_adb_result(True, f"Queue Mode Aman dimulai untuk {len(clean_ids)} produk. Jeda aktif: {interval_min} menit.")
+
+
+def oracle_stop_safe_upload_queue() -> Dict[str, Any]:
+    queue = (_oracle_load_state().get("queue") or {})
+    if not queue.get("running"):
+        def _mut(state):
+            state.setdefault("queue", {})["stop_requested"] = False
+        _oracle_with_state(_mut)
+        return oracle_adb_result(True, "Queue sedang tidak berjalan.")
+    def _mut(state):
+        q = state.setdefault("queue", {})
+        q["stop_requested"] = True
+        q["last_message"] = "Stop diminta. Oracle akan berhenti setelah langkah/jeda saat ini selesai."
+        q["updated_at"] = _oracle_now_text()
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · {q['last_message']}")
+        del state["logs"][:-120]
+    _oracle_with_state(_mut)
+    return oracle_adb_result(True, "Stop queue diminta.")
+
+
+def oracle_set_queue(running: bool, message: str, **extra) -> Dict[str, Any]:
+    def _mut(state):
+        queue = state.setdefault("queue", {})
+        queue["running"] = running
+        queue["last_message"] = message
+        queue["updated_at"] = _oracle_now_text()
+        for k, v in extra.items():
+            queue[k] = v
+        state.setdefault("logs", []).append(f"{_oracle_now_text()} · {message}")
+        del state["logs"][:-120]
+        return {"ok": True, "message": message}
+    return _oracle_with_state(_mut)
+
+
+def oracle_phone_action(product_id: int, action: str, post_now: bool = False, device_id: Optional[str] = None) -> Dict[str, Any]:
+    if action == "mark-uploaded":
+        oracle_update_product_status(product_id, "Uploaded HP")
+        msg = f"Produk #{product_id} ditandai sudah uploaded."
+        oracle_phone_log(msg, True)
+        return oracle_adb_result(True, msg)
+    if action == "reset-upload":
+        product = oracle_get_product(product_id)
+        oracle_update_product_status(product_id, "Video Downloaded" if product and product.get("local_video_path") else "Scanned")
+        msg = f"Produk #{product_id} dikembalikan ke Produk Siap Upload."
+        oracle_phone_log(msg, True)
+        return oracle_adb_result(True, msg)
+    product = oracle_get_product(product_id)
+    if not product:
+        return oracle_adb_result(False, "Produk tidak ditemukan.")
+    if action == "send":
+        res = oracle_send_to_phone(product, device_id=device_id)
+        if res.get("ok"):
+            oracle_update_product_status(product_id, "Sent HP")
+        return res
+    if action == "auto-upload":
+        caption = oracle_latest_caption(product)
+        res = oracle_auto_upload_from_phone(product, caption=caption, device_id=device_id, post_now=post_now)
+        if res.get("ok"):
+            oracle_update_product_status(product_id, "Uploaded HP" if post_now else "Upload HP Tested")
+        elif "SKIP_NEXT" in ((res.get("output") or "") + " " + (res.get("message") or "")):
+            oracle_update_product_status(product_id, "Upload HP Skip Resolusi")
+        else:
+            oracle_update_product_status(product_id, "Upload HP Gagal")
+        return res
+    return oracle_adb_result(False, f"Action tidak dikenal: {action}")
+
+
+def oracle_phone_state_data() -> Dict[str, Any]:
+    state = _oracle_load_state()
+    logs = "\n".join(state.get("logs", [])[-50:]) or "Belum ada log."
+    queue = state.get("queue", {}) or {}
+    phone_status = state.get("phone_status", {}) or {}
+    device_rows = oracle_list_devices()
+    devices = [d.get("label") or "" for d in device_rows] or ["Tidak ada perangkat terbaca."]
+    products = []
+    for p in oracle_get_ready_products(100):
+        video_path = p.get("local_video_path") or ""
+        products.append({
+            "id": str(p.get("id") or ""),
+            "name": p.get("name") or "Produk",
+            "image": p.get("image_url") or "",
+            "price": oracle_format_price(p.get("price")),
+            "video_href": "/" + video_path if video_path and not video_path.startswith("/") else video_path,
+            "status": p.get("status") or "Video Downloaded",
+            "detail_href": p.get("url") or "",
+        })
+    progress = queue.get("last_message") or "Queue belum berjalan."
+    if queue.get("running"):
+        progress += f" · {int(queue.get('done') or 0)}/{int(queue.get('total') or 0)}"
+        if queue.get("next_run_at"):
+            progress += f" · Next: {queue.get('next_run_at')}"
+    return {
+        "devices": devices,
+        "last_status": phone_status.get("last_message") or "Mode ADB aktif. Sambungkan HP, aktifkan USB debugging, lalu pilih Allow di HP.",
+        "logs": logs,
+        "queue_badge": "Running" if queue.get("running") else "Idle",
+        "queue_progress": progress,
+        "products": products,
+    }
+
+
+def oracle_render_phone_html() -> str:
+    data = oracle_phone_state_data()
+    def esc(x):
+        import html as _html
+        return _html.escape(str(x or ""), quote=True)
+    rows = []
+    for p in data.get("products", []):
+        img = f'<img src="{esc(p.get("image"))}" style="width:42px;height:42px;object-fit:cover">' if p.get("image") else ""
+        video = f'<a href="{esc(p.get("video_href"))}">Open Video</a>' if p.get("video_href") else "-"
+        detail = f'<a href="{esc(p.get("detail_href"))}">Detail</a>' if p.get("detail_href") else '<a href="#">Detail</a>'
+        pid = esc(p.get("id"))
+        rows.append(f'''
+        <tr>
+          <td>{img} {esc(p.get("name"))}</td>
+          <td>{esc(p.get("price"))}</td>
+          <td>{video}</td>
+          <td>{esc(p.get("status"))}</td>
+          <td>
+            <form action="/phone/product/{pid}/send" method="post"><button>Kirim 1 Video + Buka Produk</button></form>
+            <form action="/phone/product/{pid}/auto-upload" method="post"><button>Test Auto Upload</button></form>
+            <form action="/phone/product/{pid}/auto-upload" method="post"><input type="hidden" name="post_now" value="on"><button>Auto Upload + Posting</button></form>
+            {detail}
+          </td>
+        </tr>''')
+    rows_html = "\n".join(rows)
+    devices_html = "".join(f"<li>{esc(x)}</li>" for x in data.get("devices") or [])
+    return f'''
+    <html><body>
+      <div class="card"><div class="card-header">Status HP</div><div class="card-body"><b>ADB:</b><ul>{devices_html}</ul><b>Status terakhir:</b> {esc(data.get("last_status"))}</div></div>
+      <div class="card"><div class="card-header">Log HP</div><div id="phoneLogBox">{esc(data.get("logs"))}</div></div>
+      <div class="card"><div class="card-header">Queue Upload <span class="badge">{esc(data.get("queue_badge"))}</span></div><div class="card-body">Progress: {esc(data.get("queue_progress"))}</div></div>
+      <div class="card"><div class="card-header">Produk Siap Upload · {len(data.get("products") or [])}</div><table><tbody>{rows_html}</tbody></table></div>
+    </body></html>
+    '''
+
+
+class _OracleEmbeddedHTTPHandler:
+    """Factory supaya import http.server hanya saat engine dipakai."""
+
+    @staticmethod
+    def make():
+        import json as _json
+        import os as _os
+        import mimetypes as _mimetypes
+        from http.server import BaseHTTPRequestHandler
+        from urllib.parse import parse_qs as _parse_qs, urlparse as _urlparse
+
+        class Handler(BaseHTTPRequestHandler):
+            server_version = "CodexOracleEmbedded/1.0"
+
+            def log_message(self, format, *args):
+                return
+
+            def _headers(self, status=200, content_type="application/json"):
+                self.send_response(status)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+                self.send_header("Access-Control-Allow-Headers", "Content-Type")
+                if content_type:
+                    self.send_header("Content-Type", content_type)
+                self.end_headers()
+
+            def _json(self, payload, status=200):
+                raw = _json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                self._headers(status, "application/json; charset=utf-8")
+                self.wfile.write(raw)
+
+            def _text(self, body, status=200, content_type="text/html; charset=utf-8"):
+                raw = str(body or "").encode("utf-8")
+                self._headers(status, content_type)
+                self.wfile.write(raw)
+
+            def _redirect_phone(self):
+                self.send_response(303)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Location", "/phone")
+                self.end_headers()
+
+            def _read_body(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                return self.rfile.read(length) if length else b""
+
+            def _parse_form(self):
+                ctype = self.headers.get("Content-Type", "")
+                raw = self._read_body()
+                if "application/x-www-form-urlencoded" in ctype:
+                    return {k: v[-1] if isinstance(v, list) else v for k, v in _parse_qs(raw.decode("utf-8", "replace")).items()}
+                if "application/json" in ctype:
+                    try:
+                        return _json.loads(raw.decode("utf-8", "replace") or "{}")
+                    except Exception:
+                        return {}
+                return {k: v[-1] if isinstance(v, list) else v for k, v in _parse_qs(raw.decode("utf-8", "replace")).items()}
+
+            def do_OPTIONS(self):
+                self._headers(204, None)
+
+            def do_GET(self):
+                parsed = _urlparse(self.path)
+                path = parsed.path
+                if path in {"/", "/__health"}:
+                    self._json({"ok": True, "service": "Codex Embedded Oracle", "time": _oracle_now_text()})
+                    return
+                if path == "/scanner/active":
+                    self._json(oracle_active_payload())
+                    return
+                if path == "/phone":
+                    self._text(oracle_render_phone_html())
+                    return
+                if path.startswith("/output/videos/"):
+                    name = _os.path.basename(path)
+                    file_path = ORACLE_VIDEO_DIR / name
+                    if not file_path.exists():
+                        self._text("Not Found", status=404, content_type="text/plain; charset=utf-8")
+                        return
+                    ctype = _mimetypes.guess_type(str(file_path))[0] or "video/mp4"
+                    self.send_response(200)
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Content-Type", ctype)
+                    self.send_header("Content-Length", str(file_path.stat().st_size))
+                    self.end_headers()
+                    with file_path.open("rb") as fh:
+                        while True:
+                            chunk = fh.read(1024 * 256)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                    return
+                self._json({"ok": False, "message": "Endpoint tidak ditemukan."}, status=404)
+
+            def do_POST(self):
+                parsed = _urlparse(self.path)
+                path = parsed.path
+                try:
+                    if path == "/scanner/start":
+                        form = self._parse_form()
+                        normalized = dict(form)
+                        for key in ["include_ads", "require_video", "download_videos", "require_komisixtra"]:
+                            normalized[key] = normalized.get(key) in {"on", "1", "true", True}
+                        job = oracle_create_scan_job(normalized)
+                        self.send_response(303)
+                        self.send_header("Access-Control-Allow-Origin", "*")
+                        self.send_header("Location", f"/scanner/{job['id']}")
+                        self.end_headers()
+                        return
+                    if path == "/scanner/ingest":
+                        payload = self._parse_form()
+                        self._json(oracle_ingest_cards(int(payload.get("job_id") or 0), payload.get("cards") or [], payload.get("source_url") or ""))
+                        return
+                    if path == "/scanner/finish":
+                        payload = self._parse_form()
+                        ok_value = payload.get("ok", True)
+                        ok_bool = ok_value if isinstance(ok_value, bool) else str(ok_value).lower() not in {"false", "0", "no"}
+                        self._json(oracle_finish_job(int(payload.get("job_id") or 0), ok_bool, payload.get("message") or ""))
+                        return
+                    if path == "/scanner/save-video-url":
+                        payload = self._parse_form()
+                        self._json(oracle_download_video_url(int(payload.get("product_id") or 0), payload.get("video_url") or "", payload.get("source_url") or ""))
+                        return
+                    if path == "/scanner/upload-video":
+                        ctype = self.headers.get("Content-Type", "")
+                        if "multipart/form-data" not in ctype:
+                            self._json({"ok": False, "message": "Expected multipart/form-data."}, status=400)
+                            return
+                        raw_body = self._read_body()
+                        from email.parser import BytesParser as _BytesParser
+                        from email.policy import default as _email_default_policy
+                        pseudo = b"Content-Type: " + ctype.encode("utf-8", "replace") + b"\r\nMIME-Version: 1.0\r\n\r\n" + raw_body
+                        msg = _BytesParser(policy=_email_default_policy).parsebytes(pseudo)
+                        fields = {}
+                        files = {}
+                        for part in msg.iter_parts():
+                            disp = part.get("Content-Disposition", "")
+                            name = part.get_param("name", header="content-disposition")
+                            if not name:
+                                continue
+                            filename = part.get_filename()
+                            payload = part.get_payload(decode=True) or b""
+                            if filename:
+                                files[name] = {"filename": filename, "content": payload}
+                            else:
+                                fields[name] = payload.decode("utf-8", "replace")
+                        product_id = int(fields.get("product_id") or 0)
+                        source_url = fields.get("source_url") or ""
+                        video_url = fields.get("video_url") or ""
+                        fileitem = files.get("file")
+                        if not fileitem:
+                            self._json({"ok": False, "message": "File tidak ditemukan."}, status=400)
+                            return
+                        self._json(oracle_save_uploaded_video(product_id, fileitem.get("filename") or "video.mp4", fileitem.get("content") or b"", source_url, video_url))
+                        return
+                    if path == "/phone/logs/clear":
+                        oracle_clear_phone_logs()
+                        self._redirect_phone()
+                        return
+                    if path == "/phone/queue/start":
+                        form = self._parse_form()
+                        max_items = int(form.get("max_items") or 5)
+                        interval = int(form.get("interval_minutes") or 20)
+                        post_now = form.get("post_now") in {"on", "1", "true", True}
+                        oracle_start_safe_upload_queue(max_items=max_items, device_id=form.get("device_id") or None, post_now=post_now, interval_min=interval, interval_max=interval)
+                        self._redirect_phone()
+                        return
+                    if path == "/phone/queue/stop":
+                        oracle_stop_safe_upload_queue()
+                        self._redirect_phone()
+                        return
+                    m = re.match(r"^/phone/product/(\d+)/(send|auto-upload|mark-uploaded|reset-upload)$", path)
+                    if m:
+                        pid = int(m.group(1))
+                        action = m.group(2)
+                        form = self._parse_form()
+                        oracle_phone_action(pid, action, post_now=form.get("post_now") in {"on", "1", "true", True}, device_id=form.get("device_id") or None)
+                        self._redirect_phone()
+                        return
+                    self._json({"ok": False, "message": "Endpoint tidak ditemukan."}, status=404)
+                except Exception as exc:
+                    self._json({"ok": False, "message": str(exc)}, status=500)
+
+        return Handler
+
+
+def _oracle_port_is_open(host: str, port: int, timeout: float = 0.25) -> bool:
+    import socket as _socket
+    try:
+        with _socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
+def ensure_oracle_embedded_engine() -> Dict[str, Any]:
+    _oracle_prepare_dirs()
+    if _oracle_port_is_open(ORACLE_EMBEDDED_API_HOST, ORACLE_EMBEDDED_API_PORT):
+        return {"ok": True, "message": f"Engine aktif di {ORACLE_API_BASE_DEFAULT}", "already_running": True}
+    try:
+        import threading as _threading
+        from http.server import ThreadingHTTPServer
+        Handler = _OracleEmbeddedHTTPHandler.make()
+        server = ThreadingHTTPServer((ORACLE_EMBEDDED_API_HOST, ORACLE_EMBEDDED_API_PORT), Handler)
+        thread = _threading.Thread(target=server.serve_forever, name="codex-oracle-embedded-api", daemon=True)
+        thread.start()
+        setattr(ensure_oracle_embedded_engine, "_server", server)
+        setattr(ensure_oracle_embedded_engine, "_thread", thread)
+        oracle_log(f"Codex Embedded Oracle engine aktif di {ORACLE_API_BASE_DEFAULT}")
+        return {"ok": True, "message": f"Engine aktif di {ORACLE_API_BASE_DEFAULT}", "already_running": False}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc)}
+
+
+def oracle_get_api_base() -> str:
+    st.session_state["oracle_api_base"] = ORACLE_API_BASE_DEFAULT
+    return ORACLE_API_BASE_DEFAULT.rstrip("/")
+
+
+def oracle_http_request(method: str, path: str, *, data: Optional[Dict[str, Any]] = None, timeout: int = 20, allow_redirects: bool = False) -> Dict[str, Any]:
+    ensure_oracle_embedded_engine()
+    if requests is None:
+        return {"ok": False, "message": "Package requests belum terinstall.", "status_code": None, "text": ""}
+    base = oracle_get_api_base()
+    url = f"{base}/{path.lstrip('/')}"
+    try:
+        if method.upper() == "POST":
+            response = requests.post(url, data=data or {}, timeout=timeout, allow_redirects=allow_redirects)
+        else:
+            response = requests.get(url, timeout=timeout, allow_redirects=allow_redirects)
+        return {"ok": response.status_code < 400, "status_code": response.status_code, "headers": dict(response.headers), "text": response.text, "url": url}
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "status_code": None, "text": "", "url": url}
+
+
+def oracle_status() -> Dict[str, Any]:
+    engine = ensure_oracle_embedded_engine()
+    if not engine.get("ok"):
+        return {"online": False, "message": engine.get("message")}
+    data = oracle_active_payload()
+    return {"online": True, "data": data, "message": data.get("message") or "Codex Embedded Oracle engine online."}
 
 
 def oracle_start_scan_job(form_values: Dict[str, Any]) -> Dict[str, Any]:
@@ -8011,19 +9492,21 @@ def oracle_start_scan_job(form_values: Dict[str, Any]) -> Dict[str, Any]:
         payload["download_videos"] = "on"
     if form_values.get("require_komisixtra"):
         payload["require_komisixtra"] = "on"
-    # Di Oracle asli, start scan mengembalikan redirect ke /scanner/{job_id}.
     return oracle_http_request("POST", "/scanner/start", data=payload, timeout=60, allow_redirects=False)
 
 
 def oracle_post_phone_action(path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    return oracle_http_request("POST", path, data=payload or {}, timeout=45, allow_redirects=False)
+    return oracle_http_request("POST", path, data=payload or {}, timeout=240, allow_redirects=False)
+
+
+def oracle_fetch_phone_state() -> Dict[str, Any]:
+    return {"ok": True, "message": "OK", "data": oracle_phone_state_data()}
 
 
 def render_oracle_product_row(product: Dict[str, Any], idx: int):
     base = oracle_get_api_base()
     product_id = product.get("id") or f"row{idx}"
     cols = st.columns([4.6, 1.2, 1.0, 1.3, 3.8])
-
     with cols[0]:
         img_url = product.get("image") or ""
         if img_url and img_url.startswith("/"):
@@ -8052,54 +9535,46 @@ def render_oracle_product_row(product: Dict[str, Any], idx: int):
         with action_cols[0]:
             if st.button("Kirim", key=f"oracle_send_{product_id}_{idx}", use_container_width=True):
                 res = oracle_post_phone_action(f"/phone/product/{product_id}/send", {"device_id": ""})
-                st.toast("Perintah kirim dikirim." if res.get("ok") else res.get("message", "Gagal kirim."))
+                st.toast("Perintah kirim diterima." if res.get("ok") else res.get("message", "Gagal kirim."))
         with action_cols[1]:
             if st.button("Test", key=f"oracle_test_{product_id}_{idx}", use_container_width=True):
                 res = oracle_post_phone_action(f"/phone/product/{product_id}/auto-upload", {"device_id": ""})
-                st.toast("Test auto upload dikirim." if res.get("ok") else res.get("message", "Gagal test."))
+                st.toast("Test auto upload diterima." if res.get("ok") else res.get("message", "Gagal test."))
         with action_cols[2]:
             if st.button("Posting", key=f"oracle_posting_{product_id}_{idx}", use_container_width=True):
                 res = oracle_post_phone_action(f"/phone/product/{product_id}/auto-upload", {"device_id": "", "post_now": "on"})
-                st.toast("Auto upload + posting dikirim." if res.get("ok") else res.get("message", "Gagal posting."))
+                st.toast("Auto upload + posting diterima." if res.get("ok") else res.get("message", "Gagal posting."))
         with action_cols[3]:
             detail_href = product.get("detail_href") or ""
             if detail_href:
-                if detail_href.startswith("/"):
-                    detail_href = base + detail_href
                 st.link_button("Detail", detail_href, use_container_width=True)
             else:
                 st.caption("-")
 
 
 def render_oracle_video_finder():
+    ensure_oracle_embedded_engine()
     st.title("Oracle Video Finder")
-    st.caption("Scan keyword atau URL Shopee, download video, lalu kelola Upload HP dan Queue dalam satu layar.")
-
+    st.caption("Scan keyword/URL Shopee, ambil listing video, download source video, lalu tampilkan hasil akhir di satu layar.")
     st.info(
-        "Mode default: Oracle mencari listing yang ada ikon/play video, membuka halaman produknya, "
-        "mengunduh video sumber, lalu menampilkan produk siap upload di tabel kanan."
+        "Mesin Oracle sudah pindah ke Codex. User cukup menjalankan Codex, lalu load Chrome Extension Oracle secara manual. "
+        "Extension tetap memakai endpoint lokal http://127.0.0.1:8000 yang sekarang dinyalakan oleh Codex."
     )
-
-    with st.expander("Pengaturan Engine Oracle", expanded=False):
-        oracle_get_api_base()
-        st.text_input(
-            "Oracle API Base URL",
-            key="oracle_api_base",
-            help="Default lokal: http://127.0.0.1:8000. Untuk server, isi URL backend Oracle internal.",
-        )
+    with st.expander("Status Engine & Extension", expanded=False):
         status = oracle_status()
         if status.get("online"):
-            st.success("Oracle engine online.")
+            st.success(f"Codex Embedded Oracle engine online: {ORACLE_API_BASE_DEFAULT}")
             active_data = status.get("data") or {}
             if active_data.get("ok"):
                 st.caption(f"Scan aktif: #{active_data.get('job_id')} · {active_data.get('keyword') or active_data.get('start_url')}")
+                st.code(active_data.get("start_url") or "", language="text")
             else:
                 st.caption(active_data.get("message") or "Belum ada scan aktif.")
         else:
-            st.warning(f"Oracle engine belum terbaca: {status.get('message')}")
+            st.error(f"Engine belum aktif: {status.get('message')}")
+        st.caption("Extension: gunakan folder chrome_extension Oracle lama. Kalau belum bergerak setelah start scan, tunggu alarm extension ±30 detik atau reload extension.")
 
     left, right = st.columns([1.0, 2.05], gap="medium")
-
     with left:
         with st.container(border=True):
             st.subheader("Mulai Pencarian Video")
@@ -8124,16 +9599,13 @@ def render_oracle_video_finder():
             with c6:
                 min_sold = st.text_input("Min Sold", value="100", key="oracle_min_sold")
                 max_price = st.text_input("Max Price", value="", key="oracle_max_price")
-
             include_ads = st.checkbox("Include Ads", value=True, key="oracle_include_ads")
             require_video = st.checkbox("Hanya ambil listing yang ada video", value=True, key="oracle_require_video")
             require_komisixtra = st.checkbox("Hanya yang ada KomisiXtra jika badge terbaca di listing", value=False, key="oracle_require_komisixtra")
             download_videos = st.checkbox("Download video produk otomatis", value=True, key="oracle_download_videos")
-
             sort_by = "sales" if sort_label == "Terlaris" else "relevance"
             seller_map = {"Semua": "any", "Mall": "mall", "Star": "star", "Star+": "star_plus"}
             seller_type = seller_map.get(seller_label, "any")
-
             if st.button("Mulai Cari & Download Video", type="primary", use_container_width=True, key="oracle_start_scan"):
                 if not any([s_clean(keyword), s_clean(search_url), s_clean(category_url)]):
                     st.error("Isi minimal Keyword, Search URL, atau Category URL dulu.")
@@ -8158,18 +9630,14 @@ def render_oracle_video_finder():
                     res = oracle_start_scan_job(payload)
                     if res.get("ok") or res.get("status_code") in {302, 303, 307}:
                         location = (res.get("headers") or {}).get("Location", "")
-                        if location:
-                            st.success(f"Job scan dibuat: {location}")
-                        else:
-                            st.success("Job scan dikirim ke Oracle.")
+                        st.success(f"Job scan dibuat {location or ''}. Extension akan jalan otomatis.")
+                        st.caption("Biarkan Chrome extension aktif. Biasanya tab Shopee terbuka dalam beberapa detik sampai ±30 detik.")
                     else:
                         st.error(res.get("message") or f"Gagal start scan. HTTP {res.get('status_code')}")
-
-            st.caption("Pertama kali saja: load folder chrome_extension di Chrome Extension. Setelah itu cukup buka halaman ini dan mulai scan.")
+            st.caption("Pertama kali saja: Chrome > Extensions > Developer Mode > Load unpacked > pilih folder chrome_extension Oracle.")
 
     phone_state = oracle_fetch_phone_state()
     phone_data = phone_state.get("data") or {}
-
     with right:
         top1, top2 = st.columns([1.0, 1.55], gap="medium")
         with top1:
@@ -8192,7 +9660,6 @@ def render_oracle_video_finder():
                         oracle_post_phone_action("/phone/logs/clear")
                         st.toast("Log HP dibersihkan.")
                 st.text_area("", value=phone_data.get("logs") or "Belum ada log.", height=128, key="oracle_logs_view", label_visibility="collapsed")
-
         with st.container(border=True):
             qcols = st.columns([3, 1])
             with qcols[0]:
@@ -8223,7 +9690,6 @@ def render_oracle_video_finder():
                     st.toast("Queue dihentikan." if res.get("ok") else res.get("message", "Gagal stop queue."))
             with prog_col:
                 st.caption(phone_data.get("queue_progress") or "Queue belum berjalan.")
-
         products = phone_data.get("products") or []
         with st.container(border=True):
             st.subheader(f"Produk Siap Upload · {len(products)}")
@@ -8234,15 +9700,12 @@ def render_oracle_video_finder():
             header[3].markdown("**Status**")
             header[4].markdown("**Upload HP**")
             st.divider()
-            if not phone_state.get("ok"):
-                st.warning(phone_state.get("message") or "Oracle belum online.")
             if products:
                 for idx, product in enumerate(products, start=1):
                     render_oracle_product_row(product, idx)
                     st.divider()
             else:
                 st.caption("Belum ada produk siap upload.")
-
         if st.checkbox("Auto refresh halaman Oracle setiap 5 detik", value=False, key="oracle_auto_refresh"):
             st.caption("Auto refresh aktif. Halaman akan memuat ulang supaya progress/log terbaru masuk.")
             st.markdown("<meta http-equiv='refresh' content='5'>", unsafe_allow_html=True)
