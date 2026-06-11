@@ -7613,7 +7613,7 @@ def posting_add_image(images, identities, url, alt=""):
     return True
 
 
-def posting_extract_images(soup, html, limit=5):
+def posting_extract_images(soup, html, limit=4):
     html_main = posting_get_page_before_related(html)
     main_soup = BeautifulSoup(html_main, "html.parser")
 
@@ -7964,7 +7964,7 @@ def posting_extract_brand_category_sku(soup):
 def posting_scrape_product(url):
     html = posting_get_html(url)
     soup = BeautifulSoup(html, "html.parser")
-    images = posting_extract_images(soup, html, limit=5)
+    images = posting_extract_images(soup, html, limit=4)
     extra = posting_extract_brand_category_sku(soup)
 
     return {
@@ -7973,7 +7973,6 @@ def posting_scrape_product(url):
         "image_2": images[1],
         "image_3": images[2],
         "image_4": images[3],
-        "image_5": images[4],
         "spesifikasi_web": posting_extract_specification(soup),
         "brand": extra.get("brand", ""),
         "kategori": extra.get("kategori", ""),
@@ -7981,96 +7980,42 @@ def posting_scrape_product(url):
     }
 
 
-
-POSTING_SHOPEE_OUTPUT_COLUMNS = [
-    "KODEBARANG",
-    "JUDUL",
-    "DESKRIPSI",
-    "direct image URL_1",
-    "direct image URL_2",
-    "direct image URL_3",
-    "direct image URL_4",
-    "direct image URL_5",
-    "STOK",
-]
-
-
-def posting_to_shopee_output_df(df):
-    """Output final untuk user, format siap upload/copy ke template posting."""
-    if df is None or df.empty:
-        return pd.DataFrame(columns=POSTING_SHOPEE_OUTPUT_COLUMNS)
-
-    out = pd.DataFrame()
-    out["KODEBARANG"] = df.get("KODEBARANG", pd.Series(dtype=object)).fillna("").astype(str)
-    out["JUDUL"] = df.get("PRODUCT", pd.Series(dtype=object)).fillna("").astype(str)
-    out["DESKRIPSI"] = df.get("SPESIFIKASI_WEB", pd.Series(dtype=object)).fillna("").astype(str)
-
-    image_map = {
-        "direct image URL_1": "IMAGE_1",
-        "direct image URL_2": "IMAGE_2",
-        "direct image URL_3": "IMAGE_3",
-        "direct image URL_4": "IMAGE_4",
-        "direct image URL_5": "IMAGE_5",
-    }
-    for out_col, src_col in image_map.items():
-        out[out_col] = df.get(src_col, pd.Series(dtype=object)).fillna("").astype(str)
-
-    if "STOK" in df.columns:
-        out["STOK"] = df["STOK"]
-    else:
-        out["STOK"] = ""
-
-    return out[POSTING_SHOPEE_OUTPUT_COLUMNS]
-
-
 def create_posting_shopee_excel_download(df):
-    """Download selalu XLSX, dengan kolom sesuai kebutuhan upload/copy."""
-    output_df = posting_to_shopee_output_df(df)
     output = io.BytesIO()
 
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
-        output_df.to_excel(writer, index=False, sheet_name="HASIL")
+        df.to_excel(writer, index=False, sheet_name="HASIL")
 
         ws = writer.book["HASIL"]
-        ws.freeze_panes = "A2"
 
         for row in ws.iter_rows():
             for cell in row:
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
 
-        # Lebar kolom dibuat mirip contoh user: kode, judul, deskripsi, 5 image url, stok.
         widths = {
-            "A": 28,
-            "B": 42,
-            "C": 70,
-            "D": 34,
-            "E": 34,
-            "F": 34,
-            "G": 34,
-            "H": 34,
-            "I": 12,
+            "A": 22,
+            "B": 60,
+            "C": 72,
+            "D": 72,
+            "E": 72,
+            "F": 72,
+            "G": 85,
+            "H": 20,
+            "I": 35,
+            "J": 80,
+            "K": 18,
+            "L": 22,
+            "M": 22,
+            "N": 18,
+            "O": 18,
         }
 
         for col, width in widths.items():
             ws.column_dimensions[col].width = width
 
-        # Header biru sederhana seperti template contoh.
-        try:
-            from openpyxl.styles import Font, PatternFill, Border, Side
-            header_fill = PatternFill("solid", fgColor="9DC3E6")
-            thin = Side(style="thin", color="7F7F7F")
-            header_border = Border(left=thin, right=thin, top=thin, bottom=thin)
-            for cell in ws[1]:
-                cell.fill = header_fill
-                cell.font = Font(bold=False)
-                cell.border = header_border
-            for row in range(2, ws.max_row + 1):
-                ws.row_dimensions[row].height = 80
-        except Exception:
-            pass
-
     output.seek(0)
     return output
+
 
 def process_posting_shopee_bulk(df):
     results = []
@@ -8086,40 +8031,30 @@ def process_posting_shopee_bulk(df):
         no = idx + 1
         kodebarang = posting_clean_text(row["KODEBARANG"])
         spesifikasi_input = posting_clean_text(row["SPESIFIKASI"])
-        stok_input = row.get("STOK", "")
 
         status_box.write(f"Memproses {no}/{total}: **{kodebarang}**")
-
-        base_result = {
-            "KODEBARANG": kodebarang,
-            "PRODUCT": "",
-            "IMAGE_1": "",
-            "IMAGE_2": "",
-            "IMAGE_3": "",
-            "IMAGE_4": "",
-            "IMAGE_5": "",
-            "SPESIFIKASI_WEB": "",
-            "STOK": stok_input,
-            "STATUS": "",
-            "ERROR_MESSAGE": "",
-            "AGRES_URL": "",
-            "MATCH_SCORE": "",
-            "MATCH_SOURCE": "",
-            "BRAND_WEB": "",
-            "KATEGORI_WEB": "",
-            "SKU_WEB": "",
-        }
 
         try:
             best = posting_find_best_match(kodebarang, spesifikasi_input)
 
             if not best or best.get("not_found_error"):
-                item = dict(base_result)
-                item.update({
+                results.append({
+                    "KODEBARANG": kodebarang,
+                    "PRODUCT": "",
+                    "IMAGE_1": "",
+                    "IMAGE_2": "",
+                    "IMAGE_3": "",
+                    "IMAGE_4": "",
+                    "SPESIFIKASI_WEB": "",
                     "STATUS": "NOT_FOUND",
                     "ERROR_MESSAGE": best.get("not_found_error", "Produk tidak ditemukan di AGRES.ID") if isinstance(best, dict) else "Produk tidak ditemukan di AGRES.ID",
+                    "AGRES_URL": "",
+                    "MATCH_SCORE": "",
+                    "MATCH_SOURCE": "",
+                    "BRAND_WEB": "",
+                    "KATEGORI_WEB": "",
+                    "SKU_WEB": "",
                 })
-                results.append(item)
 
                 logs.append(f"❌ {kodebarang} - NOT_FOUND")
                 progress.progress(no / total)
@@ -8128,15 +8063,14 @@ def process_posting_shopee_bulk(df):
 
             product = posting_scrape_product(best["url"])
 
-            item = dict(base_result)
-            item.update({
+            results.append({
+                "KODEBARANG": kodebarang,
                 "PRODUCT": product["title"] or best.get("title", ""),
-                "IMAGE_1": product.get("image_1", ""),
-                "IMAGE_2": product.get("image_2", ""),
-                "IMAGE_3": product.get("image_3", ""),
-                "IMAGE_4": product.get("image_4", ""),
-                "IMAGE_5": product.get("image_5", ""),
-                "SPESIFIKASI_WEB": product.get("spesifikasi_web", ""),
+                "IMAGE_1": product["image_1"],
+                "IMAGE_2": product["image_2"],
+                "IMAGE_3": product["image_3"],
+                "IMAGE_4": product["image_4"],
+                "SPESIFIKASI_WEB": product["spesifikasi_web"],
                 "STATUS": "FOUND",
                 "ERROR_MESSAGE": "",
                 "AGRES_URL": best["url"],
@@ -8146,17 +8080,27 @@ def process_posting_shopee_bulk(df):
                 "KATEGORI_WEB": product.get("kategori", ""),
                 "SKU_WEB": product.get("sku_web", ""),
             })
-            results.append(item)
 
             logs.append(f"✅ {kodebarang} - FOUND dari AGRES.ID")
 
         except Exception as error:
-            item = dict(base_result)
-            item.update({
+            results.append({
+                "KODEBARANG": kodebarang,
+                "PRODUCT": "",
+                "IMAGE_1": "",
+                "IMAGE_2": "",
+                "IMAGE_3": "",
+                "IMAGE_4": "",
+                "SPESIFIKASI_WEB": "",
                 "STATUS": "ERROR",
                 "ERROR_MESSAGE": str(error),
+                "AGRES_URL": "",
+                "MATCH_SCORE": "",
+                "MATCH_SOURCE": "",
+                "BRAND_WEB": "",
+                "KATEGORI_WEB": "",
+                "SKU_WEB": "",
             })
-            results.append(item)
 
             logs.append(f"⚠️ {kodebarang} - ERROR: {error}")
 
@@ -8167,28 +8111,13 @@ def process_posting_shopee_bulk(df):
 
     return pd.DataFrame(results)
 
-def render_posting_shopee_result_preview(result_df):
-    """Preview bagus seperti versi sebelumnya, tapi tetap aman untuk bulk.
 
-    Download tetap XLSX format upload Shopee. Preview hanya contoh di Codex supaya UI tidak berat
-    saat 100-200+ SKU.
-    """
+def render_posting_shopee_result_preview(result_df):
+    """Tampilkan hasil AGRES langsung di Codex, termasuk gambar dan spesifikasi."""
     if result_df is None or result_df.empty:
         return
 
     st.subheader("Preview Hasil AGRES.ID")
-
-    total_rows = len(result_df)
-    preview_limit = 10
-    detail_limit = 3
-
-    if total_rows > preview_limit:
-        st.info(
-            f"Preview tabel hanya {preview_limit} baris pertama dari {total_rows} SKU supaya Codex tidak berat. "
-            "File XLSX tetap berisi semua hasil."
-        )
-    else:
-        st.caption("Preview hasil dari AGRES.ID. File download tetap XLSX dengan format upload Shopee.")
 
     display_cols = [
         "KODEBARANG",
@@ -8197,7 +8126,7 @@ def render_posting_shopee_result_preview(result_df):
         "IMAGE_2",
         "IMAGE_3",
         "IMAGE_4",
-        "IMAGE_5",
+        "SPESIFIKASI_WEB",
         "STATUS",
         "AGRES_URL",
         "MATCH_SCORE",
@@ -8206,7 +8135,7 @@ def render_posting_shopee_result_preview(result_df):
     display_cols = [col for col in display_cols if col in result_df.columns]
 
     column_config = {}
-    for img_col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5"]:
+    for img_col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4"]:
         if img_col in display_cols:
             try:
                 column_config[img_col] = st.column_config.ImageColumn(img_col, width="small")
@@ -8221,60 +8150,42 @@ def render_posting_shopee_result_preview(result_df):
 
     if display_cols:
         st.dataframe(
-            result_df[display_cols].head(preview_limit),
+            result_df[display_cols],
             use_container_width=True,
             hide_index=True,
             column_config=column_config,
-            height=360 if total_rows > 4 else None,
         )
 
     found_df = result_df[result_df.get("STATUS", "") == "FOUND"] if "STATUS" in result_df.columns else result_df
     if found_df.empty:
         return
 
-    if total_rows > detail_limit:
-        st.caption(
-            f"Detail gambar & deskripsi hanya dirender {detail_limit} SKU pertama supaya bulk tidak berat. "
-            "Semua data lengkap tetap ada di file XLSX."
-        )
-
-    detail_rows = found_df.head(detail_limit)
-    expanded = total_rows <= detail_limit
-    with st.expander("Lihat detail gambar & deskripsi siap copy", expanded=expanded):
-        for idx, row in detail_rows.iterrows():
+    with st.expander("Lihat detail gambar & deskripsi", expanded=True):
+        for idx, row in found_df.iterrows():
             kode = posting_clean_text(row.get("KODEBARANG", ""))
             product_name = posting_clean_text(row.get("PRODUCT", ""))
             st.markdown(f"**{kode}**")
             if product_name:
                 st.write(product_name)
 
-            image_urls = [posting_clean_text(row.get(col, "")) for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5"]]
+            image_urls = [posting_clean_text(row.get(col, "")) for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4"]]
             image_urls = [url for url in image_urls if url]
 
             if image_urls:
-                cols = st.columns(min(5, len(image_urls)))
-                for i, image_url in enumerate(image_urls[:5]):
+                cols = st.columns(min(4, len(image_urls)))
+                for i, image_url in enumerate(image_urls[:4]):
                     with cols[i % len(cols)]:
                         try:
                             st.image(image_url, use_container_width=True, caption=f"Image {i + 1}")
                         except Exception:
                             st.write(image_url)
-
-                st.caption("Direct image URL siap copy")
-                st.code("\n".join(image_urls), language="text")
             else:
                 st.warning("Gambar belum terbaca dari halaman AGRES.ID untuk SKU ini.")
 
             spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
             if spec_text:
-                st.markdown("**Deskripsi / Spesifikasi AGRES.ID siap copy**")
-                formatted_spec = posting_format_specification_text(spec_text)
-                st.text_area(
-                    "Deskripsi siap copy",
-                    value=formatted_spec,
-                    height=430,
-                    key=f"posting_spec_copy_{idx}_{abs(hash(formatted_spec)) % 100000000}",
-                )
+                st.markdown("**Deskripsi / Spesifikasi AGRES.ID**")
+                posting_render_specification_table(spec_text)
             else:
                 st.warning("Deskripsi/spesifikasi belum terbaca dari halaman AGRES.ID untuk SKU ini.")
 
@@ -8282,6 +8193,7 @@ def render_posting_shopee_result_preview(result_df):
             if agres_url:
                 st.caption(agres_url)
             st.markdown("---")
+
 
 def render_posting_shopee():
     st.title("Posting Shopee")
