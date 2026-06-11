@@ -8168,61 +8168,120 @@ def process_posting_shopee_bulk(df):
     return pd.DataFrame(results)
 
 def render_posting_shopee_result_preview(result_df):
-    """Preview ringan: tidak render full saat bulk banyak agar Codex tetap aman."""
+    """Preview bagus seperti versi sebelumnya, tapi tetap aman untuk bulk.
+
+    Download tetap XLSX format upload Shopee. Preview hanya contoh di Codex supaya UI tidak berat
+    saat 100-200+ SKU.
+    """
     if result_df is None or result_df.empty:
         return
 
-    output_df = posting_to_shopee_output_df(result_df)
-    total_rows = len(output_df)
+    st.subheader("Preview Hasil AGRES.ID")
+
+    total_rows = len(result_df)
     preview_limit = 10
+    detail_limit = 3
 
-    st.subheader("Preview Hasil")
     if total_rows > preview_limit:
-        st.info(f"Preview hanya {preview_limit} baris pertama dari {total_rows} SKU supaya Codex tidak berat. File XLSX tetap berisi semua hasil.")
+        st.info(
+            f"Preview tabel hanya {preview_limit} baris pertama dari {total_rows} SKU supaya Codex tidak berat. "
+            "File XLSX tetap berisi semua hasil."
+        )
     else:
-        st.caption("Preview kecil. File XLSX tetap berisi format lengkap.")
+        st.caption("Preview hasil dari AGRES.ID. File download tetap XLSX dengan format upload Shopee.")
 
-    # Preview ringkas supaya tidak memuat gambar/teks panjang untuk ratusan SKU.
-    preview_cols = ["KODEBARANG", "JUDUL", "direct image URL_1", "STOK"]
-    preview_df = output_df[preview_cols].head(preview_limit).copy()
-    st.table(preview_df)
+    display_cols = [
+        "KODEBARANG",
+        "PRODUCT",
+        "IMAGE_1",
+        "IMAGE_2",
+        "IMAGE_3",
+        "IMAGE_4",
+        "IMAGE_5",
+        "STATUS",
+        "AGRES_URL",
+        "MATCH_SCORE",
+        "ERROR_MESSAGE",
+    ]
+    display_cols = [col for col in display_cols if col in result_df.columns]
 
-    # Detail siap copy hanya ditampilkan untuk proses kecil. Bulk besar tidak dirender full.
+    column_config = {}
+    for img_col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5"]:
+        if img_col in display_cols:
+            try:
+                column_config[img_col] = st.column_config.ImageColumn(img_col, width="small")
+            except Exception:
+                pass
+
+    if "AGRES_URL" in display_cols:
+        try:
+            column_config["AGRES_URL"] = st.column_config.LinkColumn("AGRES_URL", display_text="Buka AGRES")
+        except Exception:
+            pass
+
+    if display_cols:
+        st.dataframe(
+            result_df[display_cols].head(preview_limit),
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+            height=360 if total_rows > 4 else None,
+        )
+
     found_df = result_df[result_df.get("STATUS", "") == "FOUND"] if "STATUS" in result_df.columns else result_df
     if found_df.empty:
         return
 
-    if total_rows <= 3:
-        with st.expander("Detail siap copy", expanded=True):
-            for idx, row in found_df.iterrows():
-                kode = posting_clean_text(row.get("KODEBARANG", ""))
-                product_name = posting_clean_text(row.get("PRODUCT", ""))
-                st.markdown(f"**{kode}**")
-                if product_name:
-                    st.write(product_name)
+    if total_rows > detail_limit:
+        st.caption(
+            f"Detail gambar & deskripsi hanya dirender {detail_limit} SKU pertama supaya bulk tidak berat. "
+            "Semua data lengkap tetap ada di file XLSX."
+        )
 
-                image_urls = [posting_clean_text(row.get(col, "")) for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5"]]
-                image_urls = [url for url in image_urls if url]
+    detail_rows = found_df.head(detail_limit)
+    expanded = total_rows <= detail_limit
+    with st.expander("Lihat detail gambar & deskripsi siap copy", expanded=expanded):
+        for idx, row in detail_rows.iterrows():
+            kode = posting_clean_text(row.get("KODEBARANG", ""))
+            product_name = posting_clean_text(row.get("PRODUCT", ""))
+            st.markdown(f"**{kode}**")
+            if product_name:
+                st.write(product_name)
 
-                if image_urls:
-                    st.caption("Direct image URL")
-                    st.code("\n".join(image_urls), language="text")
+            image_urls = [posting_clean_text(row.get(col, "")) for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5"]]
+            image_urls = [url for url in image_urls if url]
 
-                spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
-                if spec_text:
-                    st.text_area(
-                        "Deskripsi siap copy",
-                        value=posting_format_specification_text(spec_text),
-                        height=430,
-                        key=f"posting_spec_copy_{idx}_{abs(hash(spec_text)) % 100000000}",
-                    )
+            if image_urls:
+                cols = st.columns(min(5, len(image_urls)))
+                for i, image_url in enumerate(image_urls[:5]):
+                    with cols[i % len(cols)]:
+                        try:
+                            st.image(image_url, use_container_width=True, caption=f"Image {i + 1}")
+                        except Exception:
+                            st.write(image_url)
 
-                agres_url = posting_clean_text(row.get("AGRES_URL", ""))
-                if agres_url:
-                    st.caption(agres_url)
-                st.markdown("---")
-    else:
-        st.caption("Detail gambar/deskripsi tidak dirender full untuk bulk. Silakan download XLSX untuk semua data.")
+                st.caption("Direct image URL siap copy")
+                st.code("\n".join(image_urls), language="text")
+            else:
+                st.warning("Gambar belum terbaca dari halaman AGRES.ID untuk SKU ini.")
+
+            spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
+            if spec_text:
+                st.markdown("**Deskripsi / Spesifikasi AGRES.ID siap copy**")
+                formatted_spec = posting_format_specification_text(spec_text)
+                st.text_area(
+                    "Deskripsi siap copy",
+                    value=formatted_spec,
+                    height=430,
+                    key=f"posting_spec_copy_{idx}_{abs(hash(formatted_spec)) % 100000000}",
+                )
+            else:
+                st.warning("Deskripsi/spesifikasi belum terbaca dari halaman AGRES.ID untuk SKU ini.")
+
+            agres_url = posting_clean_text(row.get("AGRES_URL", ""))
+            if agres_url:
+                st.caption(agres_url)
+            st.markdown("---")
 
 def render_posting_shopee():
     st.title("Posting Shopee")
