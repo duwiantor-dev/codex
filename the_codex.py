@@ -1,15 +1,21 @@
 import io
 import re
+import time
 import zipfile
 import importlib.util
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
+from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import pandas as pd
+import requests
 import streamlit as st
+from bs4 import BeautifulSoup
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
+from openpyxl.styles import Alignment
 from openpyxl.worksheet.worksheet import Worksheet
+from rapidfuzz import fuzz
 
 
 # ============================================================
@@ -439,12 +445,9 @@ def summarize_issues_text(issues: List[Dict[str, Any]], max_items: int = 50) -> 
 
 
 def issues_workbook_or_none(issues: List[Dict[str, Any]]) -> Optional[bytes]:
-    # Default lebih cepat: issue hanya ditampilkan sebagai info/ringkasan, tanpa membuat Excel issue.
+    # Issue selalu tampil sebagai info/ringkasan saja.
+    # Opsi Excel di sidebar sudah dihapus supaya proses lebih ringan dan UI lebih bersih.
     st.session_state["_last_issue_info"] = summarize_issues_text(issues)
-    if not issues:
-        return None
-    if st.session_state.get("issue_output_mode", "Info saja") == "Excel":
-        return make_issues_workbook(issues)
     return None
 
 
@@ -7219,24 +7222,613 @@ def render_analisa_margin():
         height=650,
     )
 
+
+# ============================================================
+# POSTING - SHOPEE
+# ============================================================
+POSTING_SHOPEE_BASE_URL = "https://www.agres.id"
+POSTING_SHOPEE_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; CodexPostingShopee/1.0)"
+}
+
+
+def posting_clean_text(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
+def posting_get_html(url):
+    response = requests.get(url, headers=POSTING_SHOPEE_HEADERS, timeout=30)
+    response.raise_for_status()
+    time.sleep(0.35)
+    return response.text
+
+
+def posting_search_product(query):
+    search_urls = [
+        f"{POSTING_SHOPEE_BASE_URL}/catalogue?search={quote_plus(query)}",
+        f"{POSTING_SHOPEE_BASE_URL}/search?q={quote_plus(query)}",
+    ]
+
+    candidates = []
+
+    for url in search_urls:
+        try:
+            html = posting_get_html(url)
+            soup = BeautifulSoup(html, "html.parser")
+
+            for a in soup.select("a[href]"):
+                href = a.get("href", "")
+
+                if "/products/" not in href:
+                    continue
+
+                title = posting_clean_text(a.get_text(" "))
+                full_url = urljoin(POSTING_SHOPEE_BASE_URL, href)
+
+                if title or full_url:
+                    candidates.append({
+                        "title": title,
+                        "url": full_url,
+                    })
+
+        except Exception:
+            pass
+
+    seen = set()
+    unique = []
+
+    for item in candidates:
+        if item["url"] in seen:
+            continue
+
+        seen.add(item["url"])
+        unique.append(item)
+
+    return unique
+
+
+def posting_find_best_match(kodebarang, spesifikasi):
+    query = f"{spesifikasi} {kodebarang}".strip()
+    candidates = posting_search_product(query)
+
+    if not candidates:
+        parts = re.split(r"[-_ ]+", kodebarang)
+        short_query = " ".join(parts[-2:]) if len(parts) >= 2 else kodebarang
+        candidates = posting_search_product(short_query)
+
+    if not candidates:
+        return None
+
+    best = None
+    best_score = 0
+
+    for item in candidates:
+        compare_text = f'{item["title"]} {item["url"]}'
+        score = fuzz.token_set_ratio(query.lower(), compare_text.lower())
+
+        if score > best_score:
+            best_score = score
+            best = item
+
+    if best:
+        best["score"] = best_score
+
+    return best
+
+
+def posting_normalize_image_url(src):
+    if not src:
+        return ""
+
+    src = str(src).strip()
+
+    if src.startswith("data:"):
+        return ""
+
+    src = src.replace("\\/", "/")
+    return urljoin(POSTING_SHOPEE_BASE_URL, src)
+
+
+def posting_to_original_image_url(url):
+    if not url:
+        return ""
+
+    url = posting_normalize_image_url(url)
+    parsed = urlparse(url)
+
+    if "/_next/image" in parsed.path:
+        qs = parse_qs(parsed.query)
+
+        if "url" in qs and qs["url"]:
+            return unquote(qs["url"][0])
+
+    return url
+
+
+def posting_image_identity(url):
+    original = posting_to_original_image_url(url)
+    parsed = urlparse(original)
+    path = parsed.path.lower()
+    path = re.sub(r"/w_\d+[^/]*?/", "/", path)
+    path = re.sub(r"/c_[^/]+/", "/", path)
+    path = re.sub(r"/f_[^/]+/", "/", path)
+    return path
+
+
+def posting_looks_like_image_url(url):
+    low = url.lower()
+
+    if "/_next/image" in low:
+        return True
+
+    if re.search(r"\.(jpg|jpeg|png|webp|avif)(\?|$)", low):
+        return True
+
+    image_markers = [
+        "/storage/",
+        "/uploads/",
+        "/upload/",
+        "/products/",
+        "/product/",
+        "/produk/",
+        "/catalog/",
+        "/catalogue/",
+        "res.cloudinary.com",
+        "image/upload",
+        "cdn",
+        "cloudfront",
+        "s3.",
+    ]
+
+    return any(marker in low for marker in image_markers)
+
+
+def posting_is_bad_image(url, alt=""):
+    low = f"{url} {alt}".lower()
+
+    bad_words = [
+        "brand-logo",
+        "agres-red",
+        "agrescare",
+        "agreskomputer",
+        "whatsapp",
+        "email",
+        "gmail",
+        "facebook",
+        "instagram",
+        "youtube",
+        "twitter",
+        "tiktok",
+        "favicon",
+        "banner",
+        "payment",
+        "bank",
+        "store-locator",
+        "placeholder",
+        "no-image",
+        "background",
+        "newsletter",
+    ]
+
+    return any(word in low for word in bad_words)
+
+
+def posting_get_img_candidates(img):
+    candidates = []
+
+    srcset = img.get("srcset") or img.get("data-srcset")
+
+    if srcset:
+        for part in srcset.split(","):
+            candidate = part.strip().split(" ")[0]
+            candidates.append(candidate)
+
+    for attr in [
+        "src",
+        "data-src",
+        "data-lazy-src",
+        "data-original",
+        "data-zoom-image",
+        "data-large_image",
+        "data-image",
+        "data-full",
+    ]:
+        candidates.append(img.get(attr))
+
+    return candidates
+
+
+def posting_extract_title(soup):
+    h1 = soup.find("h1")
+
+    if h1:
+        return posting_clean_text(h1.get_text(" "))
+
+    og_title = soup.find("meta", property="og:title")
+
+    if og_title and og_title.get("content"):
+        return posting_clean_text(og_title.get("content"))
+
+    return ""
+
+
+def posting_get_page_before_related(html):
+    markers = [
+        "Related Items",
+        "Produk Terkait",
+        "Berlangganan Newsletter",
+    ]
+
+    cut_at = len(html)
+
+    for marker_text in markers:
+        pos = html.lower().find(marker_text.lower())
+
+        if pos != -1:
+            cut_at = min(cut_at, pos)
+
+    return html[:cut_at]
+
+
+def posting_add_image(images, identities, url, alt=""):
+    if not url:
+        return False
+
+    final_url = posting_to_original_image_url(url)
+    ident = posting_image_identity(final_url)
+
+    if not final_url or not ident:
+        return False
+
+    if ident in identities:
+        return False
+
+    if posting_is_bad_image(final_url, alt):
+        return False
+
+    if not posting_looks_like_image_url(final_url):
+        return False
+
+    identities.add(ident)
+    images.append(final_url)
+
+    return True
+
+
+def posting_extract_images(soup, html, limit=4):
+    html_main = posting_get_page_before_related(html)
+    main_soup = BeautifulSoup(html_main, "html.parser")
+
+    images = []
+    identities = set()
+
+    gallery_keywords = ["gallery", "thumbnail", "thumb", "swiper", "slick", "carousel"]
+    image_rows = []
+
+    for img in main_soup.find_all("img"):
+        alt = posting_clean_text(img.get("alt") or img.get("title") or "")
+        parent_html = str(img.parent).lower()[:2500] if img.parent else ""
+        parent_score = 0
+
+        if any(key in parent_html for key in gallery_keywords):
+            parent_score += 80
+
+        if alt:
+            parent_score += 20
+
+        for src in posting_get_img_candidates(img):
+            url = posting_normalize_image_url(src)
+
+            if not url:
+                continue
+
+            if posting_is_bad_image(url, alt):
+                continue
+
+            if not posting_looks_like_image_url(url):
+                continue
+
+            original = posting_to_original_image_url(url)
+            score = parent_score
+
+            if "/_next/image" in url.lower():
+                score += 20
+
+            if "res.cloudinary.com" in original.lower():
+                score += 20
+
+            if any(x in original.lower() for x in ["logo", "brand", "agres-red"]):
+                score -= 150
+
+            image_rows.append((score, original, alt))
+
+    image_rows.sort(key=lambda x: x[0], reverse=True)
+
+    for score, url, alt in image_rows:
+        posting_add_image(images, identities, url, alt)
+
+        if len(images) >= limit:
+            break
+
+    if len(images) < limit:
+        for match in re.findall(r'/_next/image\?url=[^"\']+', html_main, flags=re.I):
+            posting_add_image(images, identities, match)
+
+            if len(images) >= limit:
+                break
+
+    images = images[:limit]
+
+    while len(images) < limit:
+        images.append("")
+
+    return images
+
+
+def posting_extract_specification(soup):
+    page_text = soup.get_text("\n")
+    page_text = re.sub(r"\n{2,}", "\n", page_text)
+
+    patterns = [
+        r"(SPECIFICATIONS.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
+        r"(SPESIFIKASI.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
+        r"(Informasi\s*&\s*Spesifikasi.*?)(?:No additional information available|Bagikan:|Related Items|Berlangganan Newsletter|Produk Terkait)",
+    ]
+
+    spec_text = ""
+
+    for pattern in patterns:
+        match = re.search(pattern, page_text, re.I | re.S)
+
+        if match:
+            spec_text = match.group(1)
+            break
+
+    if not spec_text:
+        possible_headers = soup.find_all(string=re.compile(r"SPECIFICATIONS|SPESIFIKASI|Informasi", re.I))
+
+        for header in possible_headers:
+            parent = header.parent
+            block = parent.get_text("\n") if parent else ""
+
+            if len(block) < 100 and parent and parent.parent:
+                block = parent.parent.get_text("\n")
+
+            if len(block) > len(spec_text):
+                spec_text = block
+
+    lines = []
+
+    for line in spec_text.splitlines():
+        line = posting_clean_text(line)
+
+        if not line:
+            continue
+
+        low = line.lower()
+
+        skip_lines = [
+            "deskripsi deskripsi",
+            "informasi & spesifikasi info",
+            "specifications",
+            "spesifikasi",
+            "informasi & spesifikasi",
+            "info",
+        ]
+
+        if low in skip_lines:
+            continue
+
+        if "no additional information available" in low:
+            continue
+
+        if "bagikan" in low:
+            continue
+
+        lines.append(line)
+
+    cleaned_lines = []
+    seen = set()
+
+    for line in lines:
+        if line in seen:
+            continue
+
+        seen.add(line)
+        cleaned_lines.append(line)
+
+    return "\n".join(cleaned_lines[:100])
+
+
+def posting_scrape_product(url):
+    html = posting_get_html(url)
+    soup = BeautifulSoup(html, "html.parser")
+    images = posting_extract_images(soup, html, limit=4)
+
+    return {
+        "title": posting_extract_title(soup),
+        "image_1": images[0],
+        "image_2": images[1],
+        "image_3": images[2],
+        "image_4": images[3],
+        "spesifikasi_web": posting_extract_specification(soup),
+    }
+
+
+def create_posting_shopee_excel_download(df):
+    output = io.BytesIO()
+
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        df.to_excel(writer, index=False, sheet_name="HASIL")
+
+        ws = writer.book["HASIL"]
+
+        for row in ws.iter_rows():
+            for cell in row:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+
+        widths = {
+            "A": 22,
+            "B": 55,
+            "C": 70,
+            "D": 70,
+            "E": 70,
+            "F": 70,
+            "G": 75,
+            "H": 18,
+            "I": 35,
+        }
+
+        for col, width in widths.items():
+            ws.column_dimensions[col].width = width
+
+    output.seek(0)
+    return output
+
+
+def process_posting_shopee_bulk(df):
+    results = []
+    total = len(df)
+
+    progress = st.progress(0)
+    status_box = st.empty()
+    log_box = st.empty()
+
+    logs = []
+
+    for idx, row in df.iterrows():
+        no = idx + 1
+        kodebarang = posting_clean_text(row["KODEBARANG"])
+        spesifikasi_input = posting_clean_text(row["SPESIFIKASI"])
+
+        status_box.write(f"Memproses {no}/{total}: **{kodebarang}**")
+
+        try:
+            best = posting_find_best_match(kodebarang, spesifikasi_input)
+
+            if not best:
+                results.append({
+                    "KODEBARANG": kodebarang,
+                    "PRODUCT": "",
+                    "IMAGE_1": "",
+                    "IMAGE_2": "",
+                    "IMAGE_3": "",
+                    "IMAGE_4": "",
+                    "SPESIFIKASI_WEB": "",
+                    "STATUS": "NOT_FOUND",
+                    "ERROR_MESSAGE": "Produk tidak ditemukan di AGRES.ID",
+                })
+
+                logs.append(f"❌ {kodebarang} - NOT_FOUND")
+                continue
+
+            product = posting_scrape_product(best["url"])
+
+            results.append({
+                "KODEBARANG": kodebarang,
+                "PRODUCT": product["title"] or best["title"],
+                "IMAGE_1": product["image_1"],
+                "IMAGE_2": product["image_2"],
+                "IMAGE_3": product["image_3"],
+                "IMAGE_4": product["image_4"],
+                "SPESIFIKASI_WEB": product["spesifikasi_web"],
+                "STATUS": "FOUND",
+                "ERROR_MESSAGE": "",
+            })
+
+            logs.append(f"✅ {kodebarang} - FOUND")
+
+        except Exception as error:
+            results.append({
+                "KODEBARANG": kodebarang,
+                "PRODUCT": "",
+                "IMAGE_1": "",
+                "IMAGE_2": "",
+                "IMAGE_3": "",
+                "IMAGE_4": "",
+                "SPESIFIKASI_WEB": "",
+                "STATUS": "ERROR",
+                "ERROR_MESSAGE": str(error),
+            })
+
+            logs.append(f"⚠️ {kodebarang} - ERROR")
+
+        progress.progress(no / total)
+        log_box.text("\n".join(logs[-12:]))
+
+    status_box.write("Selesai memproses semua SKU.")
+
+    return pd.DataFrame(results)
+
+
+def render_posting_shopee():
+    st.title("Posting Shopee")
+    st.caption("Generate data posting bulk dari pricelist. Mode bulk tidak render preview per produk agar aman untuk 100–200+ SKU.")
+
+    st.write("Upload Excel dengan kolom:")
+    st.code("KODEBARANG | SPESIFIKASI | HARGA | STOK")
+
+    uploaded = st.file_uploader("Upload Pricelist", type=["xlsx", "xls"], key="posting_shopee_upload_pricelist")
+
+    if uploaded:
+        df = pd.read_excel(uploaded)
+
+        required = ["KODEBARANG", "SPESIFIKASI", "HARGA", "STOK"]
+        missing = [col for col in required if col not in df.columns]
+
+        if missing:
+            st.error(f"Kolom tidak ditemukan: {missing}")
+            st.stop()
+
+        st.info(f"Total SKU terbaca: {len(df)}")
+
+        if st.button("Mulai Generate Bulk", key="posting_shopee_generate_bulk"):
+            result_df = process_posting_shopee_bulk(df)
+            excel_file = create_posting_shopee_excel_download(result_df)
+
+            found_count = int((result_df["STATUS"] == "FOUND").sum())
+            not_found_count = int((result_df["STATUS"] == "NOT_FOUND").sum())
+            error_count = int((result_df["STATUS"] == "ERROR").sum())
+
+            st.success("Selesai generate data.")
+            st.write(f"FOUND: {found_count} | NOT_FOUND: {not_found_count} | ERROR: {error_count}")
+
+            st.download_button(
+                "Download Hasil Excel",
+                data=excel_file,
+                file_name="hasil_posting_shopee.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="posting_shopee_download_hasil",
+            )
+
+
+def render_posting_tiktokshop():
+    st.title("Posting TikTokShop")
+    st.info("Coming Soon.")
+
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
-    st.session_state["issue_output_mode"] = st.sidebar.radio(
-        "Tampilan Issue",
-        ["Info saja", "Excel"],
-        index=0 if st.session_state.get("issue_output_mode", "Info saja") == "Info saja" else 1,
-        horizontal=True,
-        key="sidebar_issue_output_mode",
-    )
+    st.session_state["issue_output_mode"] = "Info saja"
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
+        ["Dashboard", "Posting", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
         key="sidebar_main_menu",
     )
 
     if group == "Dashboard":
         route = "dashboard"
+
+    elif group == "Posting":
+        child = st.sidebar.radio(
+            "Pilih Platform",
+            ["Shopee", "TikTokShop"],
+            key="sidebar_posting_menu",
+        )
+        if child == "Shopee":
+            route = "posting_shopee"
+        else:
+            route = "posting_tiktokshop"
 
     elif group == "Update Stok":
         child = st.sidebar.radio(
@@ -7344,6 +7936,10 @@ def main():
     st.session_state.current_route = route
     if route == "dashboard":
         render_dashboard()
+    elif route == "posting_shopee":
+        render_posting_shopee()
+    elif route == "posting_tiktokshop":
+        render_posting_tiktokshop()
     elif route == "update_stok_shopee":
         render_update_stok_shopee()
     elif route == "update_stok_tiktokshop":
