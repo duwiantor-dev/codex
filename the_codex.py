@@ -1,4 +1,5 @@
 import io
+import os
 import re
 import time
 import zipfile
@@ -8,14 +9,25 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
 
 import pandas as pd
-import requests
+try:
+    import requests
+except ModuleNotFoundError:
+    requests = None
+
 import streamlit as st
-from bs4 import BeautifulSoup
+
+try:
+    from bs4 import BeautifulSoup
+except ModuleNotFoundError:
+    BeautifulSoup = None
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell.cell import MergedCell
 from openpyxl.styles import Alignment
 from openpyxl.worksheet.worksheet import Worksheet
-from rapidfuzz import fuzz
+try:
+    from rapidfuzz import fuzz
+except ModuleNotFoundError:
+    fuzz = None
 
 
 # ============================================================
@@ -27,6 +39,7 @@ MAX_TOTAL_UPLOAD_MB = 200
 BIGSELLER_MAX_ROWS_PER_FILE = 10000
 DEFAULT_TONGLE_GUDANGS = ["JKT-1A", "JKT-3B", "JKT-3C", "JKT-4B"]
 STOCK_PRICELIST_SHEETS = ["LAPTOP", "TELCO", "PC HOM ELE", "SOF COM SUP", "ACC"]
+ORACLE_API_BASE_DEFAULT = os.environ.get("ORACLE_API_BASE", "http://127.0.0.1:8000")
 
 st.set_page_config(page_title=APP_TITLE, layout="wide")
 
@@ -7232,11 +7245,29 @@ POSTING_SHOPEE_HEADERS = {
 }
 
 
+
+
+def ensure_posting_shopee_dependencies():
+    missing = []
+    if requests is None:
+        missing.append("requests")
+    if BeautifulSoup is None:
+        missing.append("beautifulsoup4")
+    if fuzz is None:
+        missing.append("rapidfuzz")
+    if missing:
+        raise RuntimeError(
+            "Fitur Posting Shopee butuh package tambahan: "
+            + ", ".join(missing)
+            + ". Tambahkan package tersebut ke requirements.txt lalu redeploy aplikasi."
+        )
+
 def posting_clean_text(text):
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
 def posting_get_html(url):
+    ensure_posting_shopee_dependencies()
     response = requests.get(url, headers=POSTING_SHOPEE_HEADERS, timeout=30)
     response.raise_for_status()
     time.sleep(0.35)
@@ -7763,6 +7794,13 @@ def process_posting_shopee_bulk(df):
 
 def render_posting_shopee():
     st.title("Posting Shopee")
+
+    try:
+        ensure_posting_shopee_dependencies()
+    except RuntimeError as error:
+        st.error(str(error))
+        st.code("requests\nbeautifulsoup4\nrapidfuzz")
+        st.stop()
     st.caption("Generate data posting bulk dari pricelist. Mode bulk tidak render preview per produk agar aman untuk 100–200+ SKU.")
 
     st.write("Upload Excel dengan kolom:")
@@ -7806,13 +7844,416 @@ def render_posting_tiktokshop():
     st.title("Posting TikTokShop")
     st.info("Coming Soon.")
 
+
+# ============================================================
+# ORACLE - VIDEO FINDER (STREAMLIT BRIDGE)
+# ============================================================
+def oracle_clean_api_base(value: str) -> str:
+    base = s_clean(value or ORACLE_API_BASE_DEFAULT)
+    if not base:
+        base = ORACLE_API_BASE_DEFAULT
+    return base.rstrip("/")
+
+
+def oracle_get_api_base() -> str:
+    if "oracle_api_base" not in st.session_state:
+        st.session_state["oracle_api_base"] = ORACLE_API_BASE_DEFAULT
+    return oracle_clean_api_base(st.session_state.get("oracle_api_base") or ORACLE_API_BASE_DEFAULT)
+
+
+def oracle_http_request(method: str, path: str, *, data: Optional[Dict[str, Any]] = None, timeout: int = 20, allow_redirects: bool = False) -> Dict[str, Any]:
+    if requests is None:
+        return {"ok": False, "message": "Package requests belum terinstall.", "status_code": None, "text": ""}
+
+    base = oracle_get_api_base()
+    url = f"{base}/{path.lstrip('/')}"
+    try:
+        if method.upper() == "POST":
+            response = requests.post(url, data=data or {}, timeout=timeout, allow_redirects=allow_redirects)
+        else:
+            response = requests.get(url, timeout=timeout, allow_redirects=allow_redirects)
+        return {
+            "ok": response.status_code < 400,
+            "status_code": response.status_code,
+            "headers": dict(response.headers),
+            "text": response.text,
+            "url": url,
+        }
+    except Exception as exc:
+        return {"ok": False, "message": str(exc), "status_code": None, "text": "", "url": url}
+
+
+def oracle_status() -> Dict[str, Any]:
+    res = oracle_http_request("GET", "/scanner/active", timeout=2, allow_redirects=False)
+    if not res.get("ok"):
+        return {"online": False, "message": res.get("message") or f"HTTP {res.get('status_code')}"}
+    try:
+        # Tidak perlu import json global; response object tidak disimpan, jadi parsing manual via requests lagi tidak ada.
+        import json as _json
+        data = _json.loads(res.get("text") or "{}")
+    except Exception:
+        data = {}
+    return {"online": True, "data": data, "message": data.get("message") or "Oracle engine online."}
+
+
+def oracle_format_price(value: Any) -> str:
+    parsed = parse_price_cell(value)
+    if parsed is None:
+        return s_clean(value) or "-"
+    return "Rp{:,.0f}".format(parsed).replace(",", ".")
+
+
+def oracle_extract_product_id_from_action(action: str) -> str:
+    match = re.search(r"/phone/product/(\d+)/", action or "")
+    return match.group(1) if match else ""
+
+
+def oracle_parse_phone_html(html_text: str) -> Dict[str, Any]:
+    data: Dict[str, Any] = {
+        "devices": [],
+        "last_status": "Belum ada proses HP.",
+        "logs": "Belum ada log.",
+        "queue_badge": "Idle",
+        "queue_progress": "Queue belum berjalan.",
+        "products": [],
+    }
+    if not html_text or BeautifulSoup is None:
+        return data
+
+    soup = BeautifulSoup(html_text, "html.parser")
+
+    log_box = soup.select_one("#phoneLogBox")
+    if log_box:
+        data["logs"] = clean_text(log_box.get_text("\n")) or "Belum ada log."
+
+    cards = soup.select(".card")
+    for card in cards:
+        header = clean_text(card.select_one(".card-header").get_text(" ")) if card.select_one(".card-header") else ""
+        body_text = clean_text(card.get_text(" "))
+        if "Status HP" in header:
+            # Ambil isi list ADB dan status terakhir secara ringan.
+            devices = [clean_text(li.get_text(" ")) for li in card.select("li") if clean_text(li.get_text(" "))]
+            data["devices"] = devices
+            chunks = [x for x in re.split(r"Status terakhir:\s*", body_text, flags=re.I) if x]
+            if len(chunks) >= 2:
+                data["last_status"] = clean_text(chunks[-1]) or data["last_status"]
+        elif "Queue Upload" in header:
+            badge = card.select_one(".badge")
+            if badge:
+                data["queue_badge"] = clean_text(badge.get_text(" ")) or "Idle"
+            # Text setelah Progress biasanya cukup jadi ringkasan.
+            progress_match = re.search(r"Progress:\s*(.*)", body_text, flags=re.I)
+            if progress_match:
+                data["queue_progress"] = clean_text(progress_match.group(0))
+
+    ready_card = None
+    for card in cards:
+        header = clean_text(card.select_one(".card-header").get_text(" ")) if card.select_one(".card-header") else ""
+        if "Produk Siap Upload" in header:
+            ready_card = card
+            break
+
+    products: List[Dict[str, Any]] = []
+    if ready_card:
+        for tr in ready_card.select("tbody tr"):
+            cols = tr.find_all("td")
+            if len(cols) < 5:
+                continue
+            product_cell = cols[0]
+            img = product_cell.find("img")
+            video_link = cols[2].find("a")
+            detail_link = None
+            for a in cols[4].find_all("a"):
+                if "Detail" in clean_text(a.get_text(" ")):
+                    detail_link = a
+                    break
+            first_form = cols[4].find("form")
+            product_id = oracle_extract_product_id_from_action(first_form.get("action", "") if first_form else "")
+            products.append({
+                "id": product_id,
+                "name": clean_text(product_cell.get_text(" ")),
+                "image": img.get("src") if img else "",
+                "price": clean_text(cols[1].get_text(" ")),
+                "video_href": video_link.get("href") if video_link else "",
+                "status": clean_text(cols[3].get_text(" ")),
+                "detail_href": detail_link.get("href") if detail_link else "",
+            })
+    data["products"] = products
+    return data
+
+
+def oracle_fetch_phone_state() -> Dict[str, Any]:
+    res = oracle_http_request("GET", "/phone", timeout=3, allow_redirects=True)
+    if not res.get("ok"):
+        return {"ok": False, "message": res.get("message") or f"Oracle /phone tidak bisa dibaca. HTTP {res.get('status_code')}", "data": oracle_parse_phone_html("")}
+    return {"ok": True, "message": "OK", "data": oracle_parse_phone_html(res.get("text") or "")}
+
+
+def oracle_start_scan_job(form_values: Dict[str, Any]) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "keyword": form_values.get("keyword", ""),
+        "search_url": form_values.get("search_url", ""),
+        "category_url": form_values.get("category_url", ""),
+        "max_products": int(form_values.get("max_products") or 30),
+        "max_pages": int(form_values.get("max_pages") or 1),
+        "min_rating": form_values.get("min_rating", ""),
+        "min_sold": form_values.get("min_sold", ""),
+        "min_price": form_values.get("min_price", ""),
+        "max_price": form_values.get("max_price", ""),
+        "sort_by": form_values.get("sort_by", "relevance"),
+        "seller_type": form_values.get("seller_type", "any"),
+    }
+    if form_values.get("include_ads"):
+        payload["include_ads"] = "on"
+    if form_values.get("require_video"):
+        payload["require_video"] = "on"
+    if form_values.get("download_videos"):
+        payload["download_videos"] = "on"
+    if form_values.get("require_komisixtra"):
+        payload["require_komisixtra"] = "on"
+    # Di Oracle asli, start scan mengembalikan redirect ke /scanner/{job_id}.
+    return oracle_http_request("POST", "/scanner/start", data=payload, timeout=60, allow_redirects=False)
+
+
+def oracle_post_phone_action(path: str, payload: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    return oracle_http_request("POST", path, data=payload or {}, timeout=45, allow_redirects=False)
+
+
+def render_oracle_product_row(product: Dict[str, Any], idx: int):
+    base = oracle_get_api_base()
+    product_id = product.get("id") or f"row{idx}"
+    cols = st.columns([4.6, 1.2, 1.0, 1.3, 3.8])
+
+    with cols[0]:
+        img_url = product.get("image") or ""
+        if img_url and img_url.startswith("/"):
+            img_url = base + img_url
+        inner = st.columns([0.8, 4.2])
+        with inner[0]:
+            if img_url:
+                st.image(img_url, width=42)
+        with inner[1]:
+            name = product.get("name") or "Produk"
+            st.write(name[:140])
+    with cols[1]:
+        st.write(product.get("price") or "-")
+    with cols[2]:
+        video_href = product.get("video_href") or ""
+        if video_href:
+            if video_href.startswith("/"):
+                video_href = base + video_href
+            st.link_button("Open Video", video_href, use_container_width=True)
+        else:
+            st.caption("-")
+    with cols[3]:
+        st.caption(product.get("status") or "-")
+    with cols[4]:
+        action_cols = st.columns(4)
+        with action_cols[0]:
+            if st.button("Kirim", key=f"oracle_send_{product_id}_{idx}", use_container_width=True):
+                res = oracle_post_phone_action(f"/phone/product/{product_id}/send", {"device_id": ""})
+                st.toast("Perintah kirim dikirim." if res.get("ok") else res.get("message", "Gagal kirim."))
+        with action_cols[1]:
+            if st.button("Test", key=f"oracle_test_{product_id}_{idx}", use_container_width=True):
+                res = oracle_post_phone_action(f"/phone/product/{product_id}/auto-upload", {"device_id": ""})
+                st.toast("Test auto upload dikirim." if res.get("ok") else res.get("message", "Gagal test."))
+        with action_cols[2]:
+            if st.button("Posting", key=f"oracle_posting_{product_id}_{idx}", use_container_width=True):
+                res = oracle_post_phone_action(f"/phone/product/{product_id}/auto-upload", {"device_id": "", "post_now": "on"})
+                st.toast("Auto upload + posting dikirim." if res.get("ok") else res.get("message", "Gagal posting."))
+        with action_cols[3]:
+            detail_href = product.get("detail_href") or ""
+            if detail_href:
+                if detail_href.startswith("/"):
+                    detail_href = base + detail_href
+                st.link_button("Detail", detail_href, use_container_width=True)
+            else:
+                st.caption("-")
+
+
+def render_oracle_video_finder():
+    st.title("Oracle Video Finder")
+    st.caption("Scan keyword atau URL Shopee, download video, lalu kelola Upload HP dan Queue dalam satu layar.")
+
+    st.info(
+        "Mode default: Oracle mencari listing yang ada ikon/play video, membuka halaman produknya, "
+        "mengunduh video sumber, lalu menampilkan produk siap upload di tabel kanan."
+    )
+
+    with st.expander("Pengaturan Engine Oracle", expanded=False):
+        oracle_get_api_base()
+        st.text_input(
+            "Oracle API Base URL",
+            key="oracle_api_base",
+            help="Default lokal: http://127.0.0.1:8000. Untuk server, isi URL backend Oracle internal.",
+        )
+        status = oracle_status()
+        if status.get("online"):
+            st.success("Oracle engine online.")
+            active_data = status.get("data") or {}
+            if active_data.get("ok"):
+                st.caption(f"Scan aktif: #{active_data.get('job_id')} · {active_data.get('keyword') or active_data.get('start_url')}")
+            else:
+                st.caption(active_data.get("message") or "Belum ada scan aktif.")
+        else:
+            st.warning(f"Oracle engine belum terbaca: {status.get('message')}")
+
+    left, right = st.columns([1.0, 2.05], gap="medium")
+
+    with left:
+        with st.container(border=True):
+            st.subheader("Mulai Pencarian Video")
+            keyword = st.text_input("Keyword", placeholder="contoh: rak dapur kayu", key="oracle_keyword")
+            search_url = st.text_input("Search URL / halaman Shopee", placeholder="https://shopee.co.id/search?keyword=...", key="oracle_search_url")
+            category_url = st.text_input("Category URL", placeholder="opsional", key="oracle_category_url")
+            c1, c2 = st.columns(2)
+            with c1:
+                max_products = st.number_input("Target Video / Scan", min_value=1, max_value=500, value=30, step=1, key="oracle_max_products")
+            with c2:
+                max_pages = st.number_input("Target Page", min_value=1, max_value=50, value=1, step=1, key="oracle_max_pages")
+            st.caption("Default 30. Bukan limit sistem, ini target per job.")
+            c3, c4 = st.columns(2)
+            with c3:
+                sort_label = st.selectbox("Urutan", ["Relevansi Shopee", "Terlaris"], key="oracle_sort_label")
+            with c4:
+                seller_label = st.selectbox("Tipe Penjual", ["Semua", "Mall", "Star", "Star+"], key="oracle_seller_label")
+            c5, c6 = st.columns(2)
+            with c5:
+                min_rating = st.text_input("Min Rating", value="4.5", key="oracle_min_rating")
+                min_price = st.text_input("Min Price", value="", key="oracle_min_price")
+            with c6:
+                min_sold = st.text_input("Min Sold", value="100", key="oracle_min_sold")
+                max_price = st.text_input("Max Price", value="", key="oracle_max_price")
+
+            include_ads = st.checkbox("Include Ads", value=True, key="oracle_include_ads")
+            require_video = st.checkbox("Hanya ambil listing yang ada video", value=True, key="oracle_require_video")
+            require_komisixtra = st.checkbox("Hanya yang ada KomisiXtra jika badge terbaca di listing", value=False, key="oracle_require_komisixtra")
+            download_videos = st.checkbox("Download video produk otomatis", value=True, key="oracle_download_videos")
+
+            sort_by = "sales" if sort_label == "Terlaris" else "relevance"
+            seller_map = {"Semua": "any", "Mall": "mall", "Star": "star", "Star+": "star_plus"}
+            seller_type = seller_map.get(seller_label, "any")
+
+            if st.button("Mulai Cari & Download Video", type="primary", use_container_width=True, key="oracle_start_scan"):
+                if not any([s_clean(keyword), s_clean(search_url), s_clean(category_url)]):
+                    st.error("Isi minimal Keyword, Search URL, atau Category URL dulu.")
+                else:
+                    payload = {
+                        "keyword": keyword,
+                        "search_url": search_url,
+                        "category_url": category_url,
+                        "max_products": max_products,
+                        "max_pages": max_pages,
+                        "min_rating": min_rating,
+                        "min_sold": min_sold,
+                        "min_price": min_price,
+                        "max_price": max_price,
+                        "include_ads": include_ads,
+                        "require_video": require_video,
+                        "require_komisixtra": require_komisixtra,
+                        "download_videos": download_videos,
+                        "sort_by": sort_by,
+                        "seller_type": seller_type,
+                    }
+                    res = oracle_start_scan_job(payload)
+                    if res.get("ok") or res.get("status_code") in {302, 303, 307}:
+                        location = (res.get("headers") or {}).get("Location", "")
+                        if location:
+                            st.success(f"Job scan dibuat: {location}")
+                        else:
+                            st.success("Job scan dikirim ke Oracle.")
+                    else:
+                        st.error(res.get("message") or f"Gagal start scan. HTTP {res.get('status_code')}")
+
+            st.caption("Pertama kali saja: load folder chrome_extension di Chrome Extension. Setelah itu cukup buka halaman ini dan mulai scan.")
+
+    phone_state = oracle_fetch_phone_state()
+    phone_data = phone_state.get("data") or {}
+
+    with right:
+        top1, top2 = st.columns([1.0, 1.55], gap="medium")
+        with top1:
+            with st.container(border=True):
+                st.subheader("Upload HP")
+                st.caption("Mode Aman v5.0")
+                st.write("**ADB:**")
+                devices = phone_data.get("devices") or ["Tidak ada perangkat terbaca."]
+                for item in devices[:5]:
+                    st.caption(f"• {item}")
+                st.write("**Status terakhir:**")
+                st.caption(phone_data.get("last_status") or "Belum ada proses HP.")
+        with top2:
+            with st.container(border=True):
+                log_header = st.columns([3, 1])
+                with log_header[0]:
+                    st.subheader("Log HP")
+                with log_header[1]:
+                    if st.button("Bersihkan Log", key="oracle_clear_log"):
+                        oracle_post_phone_action("/phone/logs/clear")
+                        st.toast("Log HP dibersihkan.")
+                st.text_area("", value=phone_data.get("logs") or "Belum ada log.", height=128, key="oracle_logs_view", label_visibility="collapsed")
+
+        with st.container(border=True):
+            qcols = st.columns([3, 1])
+            with qcols[0]:
+                st.subheader("Queue Upload")
+            with qcols[1]:
+                st.caption(phone_data.get("queue_badge") or "Idle")
+            qc1, qc2, qc3, qc4 = st.columns([1.2, 1.2, 1.15, 1.2])
+            with qc1:
+                queue_max = st.number_input("Maksimal produk", min_value=1, max_value=30, value=5, step=1, key="oracle_queue_max")
+            with qc2:
+                queue_interval = st.number_input("Jeda / produk, menit", min_value=1, max_value=180, value=20, step=1, key="oracle_queue_interval")
+            with qc3:
+                st.write("")
+                st.write("")
+                if st.button("Start Queue Test", key="oracle_queue_test", use_container_width=True):
+                    res = oracle_post_phone_action("/phone/queue/start", {"device_id": "", "max_items": int(queue_max), "interval_minutes": int(queue_interval)})
+                    st.toast("Queue test dimulai." if res.get("ok") else res.get("message", "Gagal start queue."))
+            with qc4:
+                st.write("")
+                st.write("")
+                if st.button("Start Queue + Posting", key="oracle_queue_posting", use_container_width=True):
+                    res = oracle_post_phone_action("/phone/queue/start", {"device_id": "", "max_items": int(queue_max), "interval_minutes": int(queue_interval), "post_now": "on"})
+                    st.toast("Queue + posting dimulai." if res.get("ok") else res.get("message", "Gagal start queue."))
+            stop_col, prog_col = st.columns([1, 4])
+            with stop_col:
+                if st.button("Stop Queue", key="oracle_queue_stop", use_container_width=True):
+                    res = oracle_post_phone_action("/phone/queue/stop")
+                    st.toast("Queue dihentikan." if res.get("ok") else res.get("message", "Gagal stop queue."))
+            with prog_col:
+                st.caption(phone_data.get("queue_progress") or "Queue belum berjalan.")
+
+        products = phone_data.get("products") or []
+        with st.container(border=True):
+            st.subheader(f"Produk Siap Upload · {len(products)}")
+            header = st.columns([4.6, 1.2, 1.0, 1.3, 3.8])
+            header[0].markdown("**Produk**")
+            header[1].markdown("**Harga**")
+            header[2].markdown("**Video**")
+            header[3].markdown("**Status**")
+            header[4].markdown("**Upload HP**")
+            st.divider()
+            if not phone_state.get("ok"):
+                st.warning(phone_state.get("message") or "Oracle belum online.")
+            if products:
+                for idx, product in enumerate(products, start=1):
+                    render_oracle_product_row(product, idx)
+                    st.divider()
+            else:
+                st.caption("Belum ada produk siap upload.")
+
+        if st.checkbox("Auto refresh halaman Oracle setiap 5 detik", value=False, key="oracle_auto_refresh"):
+            st.caption("Auto refresh aktif. Halaman akan memuat ulang supaya progress/log terbaru masuk.")
+            st.markdown("<meta http-equiv='refresh' content='5'>", unsafe_allow_html=True)
+
 def build_menu() -> str:
     st.sidebar.title(APP_TITLE)
     st.session_state["issue_output_mode"] = "Info saja"
 
     group = st.sidebar.radio(
         "Menu Utama",
-        ["Dashboard", "Posting", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
+        ["Dashboard", "Posting", "Oracle", "Update Stok", "Update Harga Normal", "Update Harga Coret", "Submit Campaign", "Analisa", "Affiliate"],
         key="sidebar_main_menu",
     )
 
@@ -7829,6 +8270,17 @@ def build_menu() -> str:
             route = "posting_shopee"
         else:
             route = "posting_tiktokshop"
+
+    elif group == "Oracle":
+        child = st.sidebar.radio(
+            "Menu Besar",
+            ["Video Finder"],
+            key="sidebar_oracle_menu",
+        )
+        if child == "Video Finder":
+            route = "oracle_video_finder"
+        else:
+            route = "oracle_video_finder"
 
     elif group == "Update Stok":
         child = st.sidebar.radio(
@@ -7940,6 +8392,8 @@ def main():
         render_posting_shopee()
     elif route == "posting_tiktokshop":
         render_posting_tiktokshop()
+    elif route == "oracle_video_finder":
+        render_oracle_video_finder()
     elif route == "update_stok_shopee":
         render_update_stok_shopee()
     elif route == "update_stok_tiktokshop":
