@@ -7933,6 +7933,93 @@ def process_posting_shopee_bulk(df):
     return pd.DataFrame(results)
 
 
+def render_posting_shopee_result_preview(result_df):
+    """Tampilkan hasil AGRES langsung di Codex, termasuk gambar dan spesifikasi."""
+    if result_df is None or result_df.empty:
+        return
+
+    st.subheader("Preview Hasil AGRES.ID")
+
+    display_cols = [
+        "KODEBARANG",
+        "PRODUCT",
+        "IMAGE_1",
+        "IMAGE_2",
+        "IMAGE_3",
+        "IMAGE_4",
+        "SPESIFIKASI_WEB",
+        "STATUS",
+        "AGRES_URL",
+        "MATCH_SCORE",
+        "ERROR_MESSAGE",
+    ]
+    display_cols = [col for col in display_cols if col in result_df.columns]
+
+    column_config = {}
+    for img_col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4"]:
+        if img_col in display_cols:
+            try:
+                column_config[img_col] = st.column_config.ImageColumn(img_col, width="small")
+            except Exception:
+                pass
+
+    if "AGRES_URL" in display_cols:
+        try:
+            column_config["AGRES_URL"] = st.column_config.LinkColumn("AGRES_URL", display_text="Buka AGRES")
+        except Exception:
+            pass
+
+    if display_cols:
+        st.dataframe(
+            result_df[display_cols],
+            use_container_width=True,
+            hide_index=True,
+            column_config=column_config,
+        )
+
+    found_df = result_df[result_df.get("STATUS", "") == "FOUND"] if "STATUS" in result_df.columns else result_df
+    if found_df.empty:
+        return
+
+    with st.expander("Lihat detail gambar & deskripsi", expanded=True):
+        for idx, row in found_df.iterrows():
+            kode = posting_clean_text(row.get("KODEBARANG", ""))
+            product_name = posting_clean_text(row.get("PRODUCT", ""))
+            st.markdown(f"**{kode}**")
+            if product_name:
+                st.write(product_name)
+
+            image_urls = [posting_clean_text(row.get(col, "")) for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4"]]
+            image_urls = [url for url in image_urls if url]
+
+            if image_urls:
+                cols = st.columns(min(4, len(image_urls)))
+                for i, image_url in enumerate(image_urls[:4]):
+                    with cols[i % len(cols)]:
+                        try:
+                            st.image(image_url, use_container_width=True, caption=f"Image {i + 1}")
+                        except Exception:
+                            st.write(image_url)
+            else:
+                st.warning("Gambar belum terbaca dari halaman AGRES.ID untuk SKU ini.")
+
+            spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
+            if spec_text:
+                st.text_area(
+                    "Deskripsi / Spesifikasi AGRES.ID",
+                    value=spec_text,
+                    height=220,
+                    key=f"posting_shopee_spec_preview_{idx}",
+                )
+            else:
+                st.warning("Deskripsi/spesifikasi belum terbaca dari halaman AGRES.ID untuk SKU ini.")
+
+            agres_url = posting_clean_text(row.get("AGRES_URL", ""))
+            if agres_url:
+                st.caption(agres_url)
+            st.markdown("---")
+
+
 def render_posting_shopee():
     st.title("Posting Shopee")
 
@@ -7972,9 +8059,7 @@ def render_posting_shopee():
             st.success("Selesai generate data.")
             st.write(f"FOUND: {found_count} | NOT_FOUND: {not_found_count} | ERROR: {error_count}")
 
-            preview_cols = [col for col in ["KODEBARANG", "PRODUCT", "STATUS", "AGRES_URL", "MATCH_SCORE", "ERROR_MESSAGE"] if col in result_df.columns]
-            if preview_cols:
-                st.dataframe(result_df[preview_cols], use_container_width=True)
+            render_posting_shopee_result_preview(result_df)
 
             st.download_button(
                 "Download Hasil Excel",
@@ -7983,7 +8068,6 @@ def render_posting_shopee():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="posting_shopee_download_hasil",
             )
-
 
 def render_posting_tiktokshop():
     st.title("Posting TikTokShop")
