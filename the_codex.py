@@ -4,6 +4,7 @@ import re
 import time
 import zipfile
 import importlib.util
+import html as html_lib
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, quote_plus, unquote, urljoin, urlparse
@@ -7764,7 +7765,135 @@ def posting_extract_specification(soup):
         seen.add(line)
         cleaned_lines.append(line)
 
-    return "\n".join(cleaned_lines[:100])
+    raw_spec = "\n".join(cleaned_lines[:100])
+    formatted_spec = posting_format_specification_text(raw_spec)
+    return formatted_spec or raw_spec
+
+
+POSTING_SPEC_LABELS = [
+    "Brand",
+    "Tipe",
+    "Type",
+    "Model",
+    "Color",
+    "Operating System",
+    "Processor",
+    "Graphics",
+    "VGA",
+    "RAM",
+    "Memory",
+    "Storage",
+    "SSD",
+    "HDD",
+    "Main Display Size",
+    "Main Display Type",
+    "Display Size",
+    "Display Type",
+    "Display Resolution",
+    "Resolution",
+    "Camera",
+    "Audio",
+    "Battery",
+    "Charger",
+    "Connectivity",
+    "Ports",
+    "Dimension",
+    "Dimensions",
+    "Weight",
+    "Warranty",
+    "Garansi",
+]
+
+
+def posting_parse_specification_pairs(spec_text: str) -> List[Tuple[str, str]]:
+    """Ubah spesifikasi AGRES.ID dari paragraf panjang menjadi pasangan label-value.
+
+    AGRES kadang merender spesifikasi sebagai teks panjang seperti:
+    Brand: Asus Tipe: ... Processor: ...
+    Fungsi ini mengembalikan rows supaya preview Codex rapi seperti tabel web.
+    """
+    text = posting_clean_text(spec_text)
+    if not text:
+        return []
+
+    labels_sorted = sorted(POSTING_SPEC_LABELS, key=len, reverse=True)
+    label_pattern = "|".join(re.escape(label) for label in labels_sorted)
+    pattern = re.compile(rf"(?<![A-Za-z0-9])({label_pattern})\s*:", flags=re.I)
+    matches = list(pattern.finditer(text))
+
+    if not matches:
+        pairs = []
+        for line in str(spec_text or "").splitlines():
+            line = posting_clean_text(line)
+            if not line:
+                continue
+            if ":" in line:
+                label, value = line.split(":", 1)
+                pairs.append((posting_clean_text(label), posting_clean_text(value)))
+        return [(k, v) for k, v in pairs if k and v]
+
+    pairs: List[Tuple[str, str]] = []
+    seen_keys: Set[str] = set()
+
+    for idx, match in enumerate(matches):
+        label = posting_clean_text(match.group(1))
+        start = match.end()
+        end = matches[idx + 1].start() if idx + 1 < len(matches) else len(text)
+        value = posting_clean_text(text[start:end])
+
+        if not label or not value:
+            continue
+
+        # Rapikan kapital label sesuai daftar label yang kita kenal.
+        canonical = next((known for known in POSTING_SPEC_LABELS if known.lower() == label.lower()), label)
+        dedupe_key = canonical.lower()
+        if dedupe_key in seen_keys:
+            continue
+
+        seen_keys.add(dedupe_key)
+        pairs.append((canonical, value))
+
+    return pairs
+
+
+def posting_format_specification_text(spec_text: str) -> str:
+    pairs = posting_parse_specification_pairs(spec_text)
+    if not pairs:
+        return posting_clean_text(spec_text)
+    return "\n".join(f"{label}: {value}" for label, value in pairs)
+
+
+def posting_render_specification_table(spec_text: str):
+    pairs = posting_parse_specification_pairs(spec_text)
+    if not pairs:
+        st.text_area(
+            "Deskripsi / Spesifikasi AGRES.ID",
+            value=posting_clean_text(spec_text),
+            height=220,
+        )
+        return
+
+    rows_html = []
+    for label, value in pairs:
+        rows_html.append(
+            "<tr>"
+            f"<td style='width:220px;padding:10px 12px;border-bottom:1px solid #e5e7eb;font-weight:700;color:#111827;vertical-align:top;background:#f9fafb'>{html_lib.escape(label)}</td>"
+            f"<td style='padding:10px 12px;border-bottom:1px solid #e5e7eb;color:#111827;vertical-align:top;line-height:1.55'>{html_lib.escape(value)}</td>"
+            "</tr>"
+        )
+
+    st.markdown(
+        """
+        <div style="margin-top:8px;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;background:white">
+            <table style="width:100%;border-collapse:collapse;font-size:14px">
+        """
+        + "".join(rows_html)
+        + """
+            </table>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
 
 def posting_extract_brand_category_sku(soup):
@@ -8005,12 +8134,8 @@ def render_posting_shopee_result_preview(result_df):
 
             spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
             if spec_text:
-                st.text_area(
-                    "Deskripsi / Spesifikasi AGRES.ID",
-                    value=spec_text,
-                    height=220,
-                    key=f"posting_shopee_spec_preview_{idx}",
-                )
+                st.markdown("**Deskripsi / Spesifikasi AGRES.ID**")
+                posting_render_specification_table(spec_text)
             else:
                 st.warning("Deskripsi/spesifikasi belum terbaca dari halaman AGRES.ID untuk SKU ini.")
 
