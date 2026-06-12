@@ -8058,8 +8058,18 @@ POSTING_SHOPEE_LAPTOP_ADDON_ACCESSORIES = 200_000
 POSTING_SHOPEE_LAPTOP_ADDON_CAMPAIGN = 5_000_000
 
 
+def posting_shopee_found_only_df(df: pd.DataFrame) -> pd.DataFrame:
+    """Hasil yang masuk ke Excel hanya SKU yang sukses FOUND."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    if "STATUS" not in df.columns:
+        return df.copy()
+    return df[df["STATUS"].astype(str).str.upper() == "FOUND"].copy()
+
+
 def posting_to_shopee_output_df(df):
-    """Output ringkas hasil scan AGRES.ID. Tetap disediakan sebagai file audit/debug."""
+    """Output ringkas hasil scan AGRES.ID. NOT_FOUND/ERROR tidak dimasukkan ke Excel."""
+    df = posting_shopee_found_only_df(df)
     if df is None or df.empty:
         return pd.DataFrame(columns=POSTING_SHOPEE_OUTPUT_COLUMNS)
 
@@ -8121,6 +8131,10 @@ def create_posting_shopee_excel_download(df):
         for col, width in widths.items():
             ws.column_dimensions[col].width = width
 
+        ws.sheet_format.defaultRowHeight = 15
+        for row_idx in range(1, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 15
+
         try:
             from openpyxl.styles import Font, PatternFill, Border, Side
             header_fill = PatternFill("solid", fgColor="9DC3E6")
@@ -8131,7 +8145,7 @@ def create_posting_shopee_excel_download(df):
                 cell.font = Font(bold=False)
                 cell.border = header_border
             for row_idx in range(2, ws.max_row + 1):
-                ws.row_dimensions[row_idx].height = 80
+                ws.row_dimensions[row_idx].height = 15
         except Exception:
             pass
 
@@ -8323,6 +8337,7 @@ def posting_clear_template_data_rows(ws: Worksheet, data_start: int = POSTING_SH
 
 
 def posting_count_shopee_template_rows(df: pd.DataFrame) -> int:
+    df = posting_shopee_found_only_df(df)
     if df is None or df.empty:
         return 0
     total = 0
@@ -8332,9 +8347,10 @@ def posting_count_shopee_template_rows(df: pd.DataFrame) -> int:
 
 
 def create_posting_shopee_template_download(df: pd.DataFrame, template_bytes: bytes):
-    """Isi file template mass upload Shopee dari hasil scan AGRES.ID + pricelist user."""
+    """Isi file template mass upload Shopee dari hasil FOUND saja."""
+    df = posting_shopee_found_only_df(df)
     if df is None or df.empty:
-        raise ValueError("Hasil scan masih kosong.")
+        raise ValueError("Belum ada SKU FOUND untuk dibuat template Shopee.")
     if not template_bytes:
         raise ValueError("Template Shopee belum diupload.")
 
@@ -8342,6 +8358,7 @@ def create_posting_shopee_template_download(df: pd.DataFrame, template_bytes: by
     ws = wb["Template"] if "Template" in wb.sheetnames else wb.active
     cols = posting_find_template_header_columns(ws, POSTING_SHOPEE_TEMPLATE_HEADER_ROW)
     posting_clear_template_data_rows(ws, POSTING_SHOPEE_TEMPLATE_DATA_START_ROW)
+    ws.sheet_format.defaultRowHeight = 15
 
     row_no = POSTING_SHOPEE_TEMPLATE_DATA_START_ROW
     for _, item in df.iterrows():
@@ -8380,6 +8397,9 @@ def create_posting_shopee_template_download(df: pd.DataFrame, template_bytes: by
             safe_set_cell_value(ws, row_no, cols["Berat"], weight)
 
             row_no += 1
+
+    for r in range(1, max(POSTING_SHOPEE_TEMPLATE_DATA_START_ROW, row_no)):
+        ws.row_dimensions[r].height = 15
 
     for r in range(POSTING_SHOPEE_TEMPLATE_DATA_START_ROW, max(POSTING_SHOPEE_TEMPLATE_DATA_START_ROW, row_no)):
         for c in cols.values():
@@ -8893,7 +8913,10 @@ def render_posting_shopee():
                 try:
                     template_rows = posting_count_shopee_template_rows(result_df)
                     template_file = create_posting_shopee_template_download(result_df, template_uploaded.getvalue())
-                    st.info(f"Template Shopee siap dibuat: {template_rows} baris upload. SKU -LAP- menjadi 4 variasi, selain -LAP- menjadi 2 variasi.")
+                    st.info(
+                        f"Template Shopee siap dibuat: {template_rows} baris upload dari {found_count} SKU FOUND. "
+                        "NOT_FOUND/ERROR tidak dimasukkan ke Excel. SKU -LAP- menjadi 4 variasi, selain -LAP- menjadi 2 variasi."
+                    )
                     st.download_button(
                         "Download Template Shopee Siap Upload" if st.session_state.posting_shopee_done else "Download Template Shopee Sementara",
                         data=template_file,
