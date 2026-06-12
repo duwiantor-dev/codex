@@ -7265,6 +7265,13 @@ def ensure_posting_shopee_dependencies():
 
 
 def posting_clean_text(text):
+    if text is None:
+        return ""
+    try:
+        if pd.isna(text):
+            return ""
+    except Exception:
+        pass
     return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
@@ -8044,9 +8051,15 @@ POSTING_SHOPEE_OUTPUT_COLUMNS = [
     "STOK",
 ]
 
+POSTING_SHOPEE_TEMPLATE_HEADER_ROW = 3
+POSTING_SHOPEE_TEMPLATE_DATA_START_ROW = 7
+POSTING_SHOPEE_LAPTOP_ADDON_ANTIGORES = 200_000
+POSTING_SHOPEE_LAPTOP_ADDON_ACCESSORIES = 200_000
+POSTING_SHOPEE_LAPTOP_ADDON_CAMPAIGN = 5_000_000
+
 
 def posting_to_shopee_output_df(df):
-    """Output final untuk user, format siap upload/copy ke template posting."""
+    """Output ringkas hasil scan AGRES.ID. Tetap disediakan sebagai file audit/debug."""
     if df is None or df.empty:
         return pd.DataFrame(columns=POSTING_SHOPEE_OUTPUT_COLUMNS)
 
@@ -8056,6 +8069,8 @@ def posting_to_shopee_output_df(df):
 
     # DESKRIPSI hanya spesifikasi siap copy. Tidak ikut Harga/Price/Subtotal.
     desc_src = df.get("SPESIFIKASI_WEB", pd.Series(dtype=object)).fillna("").astype(str)
+    if "SPESIFIKASI_INPUT" in df.columns:
+        desc_src = desc_src.where(desc_src.str.strip() != "", df["SPESIFIKASI_INPUT"].fillna("").astype(str))
     out["DESKRIPSI"] = desc_src.apply(posting_format_specification_text)
 
     image_map = {
@@ -8077,7 +8092,7 @@ def posting_to_shopee_output_df(df):
 
 
 def create_posting_shopee_excel_download(df):
-    """Download selalu XLSX, dengan layout mirip template user."""
+    """Download hasil scan mentah/ringkas, bukan template mass upload Shopee."""
     output_df = posting_to_shopee_output_df(df)
     output = io.BytesIO()
 
@@ -8124,6 +8139,258 @@ def create_posting_shopee_excel_download(df):
     return output
 
 
+def posting_shopee_is_laptop_sku(kodebarang: str) -> bool:
+    return "-LAP-" in su(kodebarang)
+
+
+def posting_shopee_price_to_rupiah(value) -> Optional[int]:
+    """Pricelist Posting menyimpan harga ribuan, jadi 10.000 menjadi 10.000.000."""
+    price = parse_price_cell(value)
+    if price is None:
+        return None
+    return int(price) * 1000
+
+
+def posting_shopee_generated_integration_code(kodebarang: str) -> str:
+    base = re.sub(r"[^A-Z0-9_\-]", "", su(kodebarang))
+    if not base:
+        base = "VARIASI"
+    return f"COD-{base}"[:100]
+
+
+def posting_shopee_product_title(row: pd.Series) -> str:
+    title = posting_clean_text(row.get("PRODUCT", ""))
+    if title:
+        return title
+    return posting_clean_text(row.get("KODEBARANG", ""))
+
+
+def posting_shopee_product_description(row: pd.Series) -> str:
+    spec_text = posting_clean_text(row.get("SPESIFIKASI_WEB", ""))
+    if not spec_text:
+        spec_text = posting_clean_text(row.get("SPESIFIKASI_INPUT", ""))
+    return posting_format_specification_text(spec_text)
+
+
+def posting_shopee_image_values(row: pd.Series, total_slots: int = 9) -> List[str]:
+    images = []
+    for col in ["IMAGE_1", "IMAGE_2", "IMAGE_3", "IMAGE_4", "IMAGE_5", "IMAGE_6", "IMAGE_7", "IMAGE_8", "IMAGE_9"]:
+        val = posting_clean_text(row.get(col, ""))
+        if val:
+            images.append(val)
+    while len(images) < total_slots:
+        images.append("")
+    return images[:total_slots]
+
+
+def posting_shopee_detect_weight(row: pd.Series) -> str:
+    kodebarang = posting_clean_text(row.get("KODEBARANG", ""))
+    title = posting_clean_text(row.get("PRODUCT", ""))
+    desc = posting_clean_text(row.get("SPESIFIKASI_WEB", "")) or posting_clean_text(row.get("SPESIFIKASI_INPUT", ""))
+    kategori = posting_clean_text(row.get("KATEGORI_WEB", ""))
+    text = f"{kodebarang} {title} {desc} {kategori}".lower()
+
+    if posting_shopee_is_laptop_sku(kodebarang):
+        # 15.6 / 15 inch dianggap laptop 15 inch.
+        if re.search(r"(?<!\d)15(?:[\.,]6|[\.,]0)?\s*(?:inch|inches|inci|in\b|\"|”)", text):
+            return "8000"
+        if re.search(r"(?<!\d)14(?:[\.,]0)?\s*(?:inch|inches|inci|in\b|\"|”)", text):
+            return "4000"
+        # Default laptop kalau ukuran tidak kebaca dari hasil scan.
+        return "4000"
+
+    if any(word in text for word in ["phone", "smartphone", "handphone", "mobile phone", "ponsel", "telepon seluler"]):
+        return "1000"
+
+    return ""
+
+
+def posting_shopee_variant_rows(row: pd.Series) -> List[Dict[str, Any]]:
+    kodebarang = posting_clean_text(row.get("KODEBARANG", ""))
+    stock = row.get("STOK", "")
+    base_price = posting_shopee_price_to_rupiah(row.get("HARGA", ""))
+    price_normal = "" if base_price is None else int(base_price)
+    campaign_price = "" if base_price is None else int(base_price) + POSTING_SHOPEE_LAPTOP_ADDON_CAMPAIGN
+    integration = posting_shopee_generated_integration_code(kodebarang)
+
+    # Semua produk dibuat variasi supaya siap mass upload Shopee.
+    # - SKU laptop (-LAP-) punya 4 variasi: Normal, +Antigores, +Accessories, Campaign.
+    # - Produk lain punya 2 variasi: Normal dan Campaign.
+    variants = [
+        {
+            "kode_variasi": kodebarang,
+            "kode_integrasi": integration,
+            "nama_variasi_1": "Pilihan",
+            "varian_1": "Normal",
+            "harga": price_normal,
+            "stok": stock,
+        }
+    ]
+
+    if posting_shopee_is_laptop_sku(kodebarang):
+        variants.extend([
+            {
+                "kode_variasi": f"{kodebarang}+PC",
+                "kode_integrasi": integration,
+                "nama_variasi_1": "Pilihan",
+                "varian_1": "+Antigores",
+                "harga": "" if base_price is None else int(base_price) + POSTING_SHOPEE_LAPTOP_ADDON_ANTIGORES,
+                "stok": stock,
+            },
+            {
+                "kode_variasi": f"{kodebarang}+BA",
+                "kode_integrasi": integration,
+                "nama_variasi_1": "Pilihan",
+                "varian_1": "+Accessories",
+                "harga": "" if base_price is None else int(base_price) + POSTING_SHOPEE_LAPTOP_ADDON_ACCESSORIES,
+                "stok": stock,
+            },
+        ])
+
+    variants.append({
+        "kode_variasi": "ND-ALL-CAMPAIGN",
+        "kode_integrasi": integration,
+        "nama_variasi_1": "Pilihan",
+        "varian_1": "Campaign",
+        "harga": campaign_price,
+        "stok": stock,
+    })
+
+    return variants
+
+
+def posting_find_template_header_columns(ws: Worksheet, header_row: int = POSTING_SHOPEE_TEMPLATE_HEADER_ROW) -> Dict[str, int]:
+    header_map: Dict[str, int] = {}
+    for c in range(1, ws.max_column + 1):
+        header = s_clean(ws.cell(row=header_row, column=c).value)
+        if not header:
+            continue
+        header_map[header.lower()] = c
+
+    wanted = [
+        "Nama Produk",
+        "Deskripsi Produk",
+        "SKU Induk",
+        "Kode Integrasi Variasi",
+        "Nama Variasi 1",
+        "Varian untuk Variasi 1",
+        "Harga",
+        "Stok",
+        "Kode Variasi",
+        "Foto Sampul",
+        "Foto Produk 1",
+        "Foto Produk 2",
+        "Foto Produk 3",
+        "Foto Produk 4",
+        "Foto Produk 5",
+        "Foto Produk 6",
+        "Foto Produk 7",
+        "Foto Produk 8",
+        "Berat",
+    ]
+
+    found: Dict[str, int] = {}
+    for name in wanted:
+        col = header_map.get(name.lower())
+        if col:
+            found[name] = col
+
+    required = [
+        "Nama Produk",
+        "Deskripsi Produk",
+        "Kode Integrasi Variasi",
+        "Nama Variasi 1",
+        "Varian untuk Variasi 1",
+        "Harga",
+        "Stok",
+        "Kode Variasi",
+        "Foto Sampul",
+        "Berat",
+    ]
+    missing = [name for name in required if name not in found]
+    if missing:
+        raise ValueError(
+            "Header template Shopee tidak lengkap di row 3. Kolom tidak ditemukan: "
+            + ", ".join(missing)
+        )
+
+    return found
+
+
+def posting_clear_template_data_rows(ws: Worksheet, data_start: int = POSTING_SHOPEE_TEMPLATE_DATA_START_ROW):
+    if ws.max_row >= data_start:
+        ws.delete_rows(data_start, ws.max_row - data_start + 1)
+
+
+def posting_count_shopee_template_rows(df: pd.DataFrame) -> int:
+    if df is None or df.empty:
+        return 0
+    total = 0
+    for _, row in df.iterrows():
+        total += len(posting_shopee_variant_rows(row))
+    return total
+
+
+def create_posting_shopee_template_download(df: pd.DataFrame, template_bytes: bytes):
+    """Isi file template mass upload Shopee dari hasil scan AGRES.ID + pricelist user."""
+    if df is None or df.empty:
+        raise ValueError("Hasil scan masih kosong.")
+    if not template_bytes:
+        raise ValueError("Template Shopee belum diupload.")
+
+    wb = load_workbook(io.BytesIO(template_bytes))
+    ws = wb["Template"] if "Template" in wb.sheetnames else wb.active
+    cols = posting_find_template_header_columns(ws, POSTING_SHOPEE_TEMPLATE_HEADER_ROW)
+    posting_clear_template_data_rows(ws, POSTING_SHOPEE_TEMPLATE_DATA_START_ROW)
+
+    row_no = POSTING_SHOPEE_TEMPLATE_DATA_START_ROW
+    for _, item in df.iterrows():
+        kodebarang = posting_clean_text(item.get("KODEBARANG", ""))
+        title = posting_shopee_product_title(item)
+        description = posting_shopee_product_description(item)
+        images = posting_shopee_image_values(item, total_slots=9)
+        weight = posting_shopee_detect_weight(item)
+        variants = posting_shopee_variant_rows(item)
+
+        for variant_idx, variant in enumerate(variants):
+            is_first_variant = variant_idx == 0
+
+            # Kolom produk utama mengikuti panduan template: untuk variasi, isi di baris variasi pertama saja.
+            if is_first_variant:
+                safe_set_cell_value(ws, row_no, cols["Nama Produk"], title)
+                safe_set_cell_value(ws, row_no, cols["Deskripsi Produk"], description)
+                safe_set_cell_value(ws, row_no, cols["Foto Sampul"], images[0])
+                for img_idx in range(1, 9):
+                    col_name = f"Foto Produk {img_idx}"
+                    if col_name in cols:
+                        safe_set_cell_value(ws, row_no, cols[col_name], images[img_idx])
+            else:
+                safe_set_cell_value(ws, row_no, cols["Nama Produk"], "")
+                safe_set_cell_value(ws, row_no, cols["Deskripsi Produk"], "")
+
+            if "SKU Induk" in cols:
+                safe_set_cell_value(ws, row_no, cols["SKU Induk"], "")
+
+            safe_set_cell_value(ws, row_no, cols["Kode Integrasi Variasi"], variant["kode_integrasi"])
+            safe_set_cell_value(ws, row_no, cols["Nama Variasi 1"], variant["nama_variasi_1"])
+            safe_set_cell_value(ws, row_no, cols["Varian untuk Variasi 1"], variant["varian_1"])
+            safe_set_cell_value(ws, row_no, cols["Harga"], variant["harga"])
+            safe_set_cell_value(ws, row_no, cols["Stok"], variant["stok"])
+            safe_set_cell_value(ws, row_no, cols["Kode Variasi"], variant["kode_variasi"])
+            safe_set_cell_value(ws, row_no, cols["Berat"], weight)
+
+            row_no += 1
+
+    for r in range(POSTING_SHOPEE_TEMPLATE_DATA_START_ROW, max(POSTING_SHOPEE_TEMPLATE_DATA_START_ROW, row_no)):
+        for c in cols.values():
+            ws.cell(row=r, column=c).alignment = Alignment(wrap_text=True, vertical="top")
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out
+
+
 POSTING_SHOPEE_BATCH_DEFAULT = 100
 POSTING_SHOPEE_BATCH_MIN = 20
 POSTING_SHOPEE_BATCH_MAX = 300
@@ -8132,6 +8399,8 @@ POSTING_SHOPEE_BATCH_DELAY_DEFAULT = 1.0
 
 POSTING_SHOPEE_RESULT_COLUMNS = [
     "KODEBARANG",
+    "SPESIFIKASI_INPUT",
+    "HARGA",
     "PRODUCT",
     "IMAGE_1",
     "IMAGE_2",
@@ -8185,9 +8454,11 @@ def posting_shopee_safe_rerun():
         st.experimental_rerun()
 
 
-def posting_shopee_base_result(kodebarang: str, stok_input) -> Dict[str, Any]:
+def posting_shopee_base_result(kodebarang: str, stok_input, harga_input="", spesifikasi_input: str = "") -> Dict[str, Any]:
     return {
         "KODEBARANG": kodebarang,
+        "SPESIFIKASI_INPUT": spesifikasi_input,
+        "HARGA": harga_input,
         "PRODUCT": "",
         "IMAGE_1": "",
         "IMAGE_2": "",
@@ -8229,10 +8500,11 @@ def process_posting_shopee_batch(df, start_index: int = 0, batch_size: int = POS
         no = pos + 1
         kodebarang = posting_clean_text(row.get("KODEBARANG", ""))
         spesifikasi_input = posting_clean_text(row.get("SPESIFIKASI", ""))
+        harga_input = row.get("HARGA", "")
         stok_input = row.get("STOK", "")
 
         status_box.write(f"Memproses {no}/{total}: **{kodebarang}**")
-        base_result = posting_shopee_base_result(kodebarang, stok_input)
+        base_result = posting_shopee_base_result(kodebarang, stok_input, harga_input, spesifikasi_input)
 
         try:
             best = posting_find_best_match(kodebarang, spesifikasi_input)
@@ -8443,9 +8715,16 @@ def render_posting_shopee():
     st.code("KODEBARANG | SPESIFIKASI | HARGA | STOK")
 
     uploaded = st.file_uploader("Upload Pricelist", type=["xlsx", "xls"], key="posting_shopee_upload_pricelist")
+    template_uploaded = st.file_uploader(
+        "Upload Template Mass Upload Shopee",
+        type=["xlsx", "xlsm"],
+        key="posting_shopee_upload_template",
+        help="Pakai template Shopee dengan header di row 3. Sheet 'Template' akan diisi mulai row 7.",
+    )
 
     if uploaded:
-        upload_signature = f"{getattr(uploaded, 'name', '')}:{getattr(uploaded, 'size', '')}"
+        template_signature = f"{getattr(template_uploaded, 'name', '')}:{getattr(template_uploaded, 'size', '')}" if template_uploaded else "no-template"
+        upload_signature = f"{getattr(uploaded, 'name', '')}:{getattr(uploaded, 'size', '')}:{template_signature}"
         if st.session_state.posting_shopee_upload_signature != upload_signature:
             posting_shopee_reset_batch_state(upload_signature)
 
@@ -8610,11 +8889,28 @@ def render_posting_shopee():
 
             st.write(f"FOUND: {found_count} | NOT_FOUND: {not_found_count} | ERROR: {error_count}")
 
+            if template_uploaded:
+                try:
+                    template_rows = posting_count_shopee_template_rows(result_df)
+                    template_file = create_posting_shopee_template_download(result_df, template_uploaded.getvalue())
+                    st.info(f"Template Shopee siap dibuat: {template_rows} baris upload. SKU laptop -LAP- otomatis menjadi 4 variasi.")
+                    st.download_button(
+                        "Download Template Shopee Siap Upload" if st.session_state.posting_shopee_done else "Download Template Shopee Sementara",
+                        data=template_file,
+                        file_name="hasil_mass_upload_shopee.xlsx" if st.session_state.posting_shopee_done else "hasil_mass_upload_shopee_sementara.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key=f"posting_shopee_download_template_{len(result_df)}_{int(st.session_state.posting_shopee_done)}_{getattr(template_uploaded, 'size', 0)}",
+                    )
+                except Exception as error:
+                    st.error(f"Gagal membuat template Shopee: {error}")
+            else:
+                st.warning("Upload Template Mass Upload Shopee untuk mendapatkan file siap upload ke Shopee.")
+
             excel_file = create_posting_shopee_excel_download(result_df)
             st.download_button(
-                "Download Hasil Excel" if st.session_state.posting_shopee_done else "Download Hasil Excel Sementara",
+                "Download Hasil Scan AGRES.ID" if st.session_state.posting_shopee_done else "Download Hasil Scan AGRES.ID Sementara",
                 data=excel_file,
-                file_name="hasil_posting_shopee.xlsx" if st.session_state.posting_shopee_done else "hasil_posting_shopee_sementara.xlsx",
+                file_name="hasil_scan_posting_shopee.xlsx" if st.session_state.posting_shopee_done else "hasil_scan_posting_shopee_sementara.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key=f"posting_shopee_download_hasil_{len(result_df)}_{int(st.session_state.posting_shopee_done)}",
             )
