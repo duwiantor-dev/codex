@@ -7306,13 +7306,44 @@ def posting_query_variants(kodebarang, spesifikasi) -> List[str]:
     return clean_variants
 
 
-def posting_get_html(url):
+_POSTING_SHOPEE_HTTP_SESSION = None
+
+
+def posting_get_http_session():
+    """Pakai ulang koneksi HTTP selama proses batch supaya request AGRES.ID lebih ringan."""
     ensure_posting_shopee_dependencies()
-    with requests.Session() as session:
-        response = session.get(url, headers=POSTING_SHOPEE_HEADERS, timeout=35)
-        response.raise_for_status()
-        time.sleep(0.25)
-        return response.text
+    global _POSTING_SHOPEE_HTTP_SESSION
+    if _POSTING_SHOPEE_HTTP_SESSION is None:
+        _POSTING_SHOPEE_HTTP_SESSION = requests.Session()
+        _POSTING_SHOPEE_HTTP_SESSION.headers.update(POSTING_SHOPEE_HEADERS)
+    return _POSTING_SHOPEE_HTTP_SESSION
+
+
+def posting_get_html(url, retries: int = 3):
+    ensure_posting_shopee_dependencies()
+    session = posting_get_http_session()
+    last_error = None
+
+    for attempt in range(max(1, int(retries or 1))):
+        try:
+            response = session.get(url, timeout=(8, 25))
+
+            # AGRES.ID kadang membalas sementara penuh / terlalu banyak request.
+            # Jangan langsung matikan proses, tunggu sebentar lalu coba ulang.
+            if response.status_code in (429, 500, 502, 503, 504):
+                last_error = RuntimeError(f"HTTP {response.status_code} dari AGRES.ID")
+                time.sleep(2 + attempt * 2)
+                continue
+
+            response.raise_for_status()
+            time.sleep(0.55)
+            return response.text
+
+        except Exception as error:
+            last_error = error
+            time.sleep(2 + attempt * 2)
+
+    raise last_error
 
 
 def posting_product_url_from_text(text: str) -> str:
@@ -8093,43 +8124,115 @@ def create_posting_shopee_excel_download(df):
     return output
 
 
-def process_posting_shopee_bulk(df):
-    results = []
+POSTING_SHOPEE_BATCH_DEFAULT = 100
+POSTING_SHOPEE_BATCH_MIN = 20
+POSTING_SHOPEE_BATCH_MAX = 300
+POSTING_SHOPEE_BATCH_DELAY_DEFAULT = 1.0
+
+
+POSTING_SHOPEE_RESULT_COLUMNS = [
+    "KODEBARANG",
+    "PRODUCT",
+    "IMAGE_1",
+    "IMAGE_2",
+    "IMAGE_3",
+    "IMAGE_4",
+    "IMAGE_5",
+    "SPESIFIKASI_WEB",
+    "STOK",
+    "STATUS",
+    "ERROR_MESSAGE",
+    "AGRES_URL",
+    "MATCH_SCORE",
+    "MATCH_SOURCE",
+    "BRAND_WEB",
+    "KATEGORI_WEB",
+    "SKU_WEB",
+]
+
+
+def posting_shopee_init_batch_state():
+    defaults = {
+        "posting_shopee_results": [],
+        "posting_shopee_next_index": 0,
+        "posting_shopee_running": False,
+        "posting_shopee_done": False,
+        "posting_shopee_upload_signature": "",
+        "posting_shopee_last_message": "",
+        "posting_shopee_batch_size": POSTING_SHOPEE_BATCH_DEFAULT,
+        "posting_shopee_auto_continue": True,
+        "posting_shopee_batch_delay": POSTING_SHOPEE_BATCH_DELAY_DEFAULT,
+    }
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
+
+
+def posting_shopee_reset_batch_state(upload_signature: Optional[str] = None):
+    st.session_state.posting_shopee_results = []
+    st.session_state.posting_shopee_next_index = 0
+    st.session_state.posting_shopee_running = False
+    st.session_state.posting_shopee_done = False
+    st.session_state.posting_shopee_last_message = ""
+    if upload_signature is not None:
+        st.session_state.posting_shopee_upload_signature = upload_signature
+
+
+def posting_shopee_safe_rerun():
+    if hasattr(st, "rerun"):
+        st.rerun()
+    else:
+        st.experimental_rerun()
+
+
+def posting_shopee_base_result(kodebarang: str, stok_input) -> Dict[str, Any]:
+    return {
+        "KODEBARANG": kodebarang,
+        "PRODUCT": "",
+        "IMAGE_1": "",
+        "IMAGE_2": "",
+        "IMAGE_3": "",
+        "IMAGE_4": "",
+        "IMAGE_5": "",
+        "SPESIFIKASI_WEB": "",
+        "STOK": stok_input,
+        "STATUS": "",
+        "ERROR_MESSAGE": "",
+        "AGRES_URL": "",
+        "MATCH_SCORE": "",
+        "MATCH_SOURCE": "",
+        "BRAND_WEB": "",
+        "KATEGORI_WEB": "",
+        "SKU_WEB": "",
+    }
+
+
+def process_posting_shopee_batch(df, start_index: int = 0, batch_size: int = POSTING_SHOPEE_BATCH_DEFAULT) -> List[Dict[str, Any]]:
+    """Proses sebagian SKU saja. Hasilnya disimpan oleh render_posting_shopee ke session_state."""
+    results: List[Dict[str, Any]] = []
     total = len(df)
 
-    progress = st.progress(0)
+    if total <= 0:
+        return results
+
+    start_index = max(0, min(int(start_index or 0), total))
+    batch_size = max(1, int(batch_size or POSTING_SHOPEE_BATCH_DEFAULT))
+    end_index = min(start_index + batch_size, total)
+
+    progress = st.progress(start_index / max(total, 1))
     status_box = st.empty()
     log_box = st.empty()
+    logs: List[str] = []
 
-    logs = []
-
-    for idx, row in df.iterrows():
-        no = idx + 1
-        kodebarang = posting_clean_text(row["KODEBARANG"])
-        spesifikasi_input = posting_clean_text(row["SPESIFIKASI"])
+    for pos in range(start_index, end_index):
+        row = df.iloc[pos]
+        no = pos + 1
+        kodebarang = posting_clean_text(row.get("KODEBARANG", ""))
+        spesifikasi_input = posting_clean_text(row.get("SPESIFIKASI", ""))
         stok_input = row.get("STOK", "")
 
         status_box.write(f"Memproses {no}/{total}: **{kodebarang}**")
-
-        base_result = {
-            "KODEBARANG": kodebarang,
-            "PRODUCT": "",
-            "IMAGE_1": "",
-            "IMAGE_2": "",
-            "IMAGE_3": "",
-            "IMAGE_4": "",
-            "IMAGE_5": "",
-            "SPESIFIKASI_WEB": "",
-            "STOK": stok_input,
-            "STATUS": "",
-            "ERROR_MESSAGE": "",
-            "AGRES_URL": "",
-            "MATCH_SCORE": "",
-            "MATCH_SOURCE": "",
-            "BRAND_WEB": "",
-            "KATEGORI_WEB": "",
-            "SKU_WEB": "",
-        }
+        base_result = posting_shopee_base_result(kodebarang, stok_input)
 
         try:
             best = posting_find_best_match(kodebarang, spesifikasi_input)
@@ -8143,7 +8246,7 @@ def process_posting_shopee_bulk(df):
                 results.append(item)
 
                 logs.append(f"❌ {kodebarang} - NOT_FOUND")
-                progress.progress(no / total)
+                progress.progress(no / max(total, 1))
                 log_box.text("\n".join(logs[-12:]))
                 continue
 
@@ -8168,7 +8271,6 @@ def process_posting_shopee_bulk(df):
                 "SKU_WEB": product.get("sku_web", ""),
             })
             results.append(item)
-
             logs.append(f"✅ {kodebarang} - FOUND dari AGRES.ID")
 
         except Exception as error:
@@ -8178,16 +8280,33 @@ def process_posting_shopee_bulk(df):
                 "ERROR_MESSAGE": str(error),
             })
             results.append(item)
-
             logs.append(f"⚠️ {kodebarang} - ERROR: {error}")
 
-        progress.progress(no / total)
+        progress.progress(no / max(total, 1))
         log_box.text("\n".join(logs[-12:]))
 
-    status_box.write("Selesai memproses semua SKU.")
+    status_box.write(f"Batch selesai: SKU {start_index + 1} sampai {end_index} dari {total}.")
+    return results
 
-    return pd.DataFrame(results)
 
+def process_posting_shopee_bulk(df):
+    """Kompatibel dengan pemanggilan lama, tapi render utama sekarang memakai batch otomatis."""
+    all_results: List[Dict[str, Any]] = []
+    total = len(df)
+    next_index = 0
+
+    while next_index < total:
+        batch_results = process_posting_shopee_batch(
+            df,
+            start_index=next_index,
+            batch_size=POSTING_SHOPEE_BATCH_DEFAULT,
+        )
+        if not batch_results:
+            break
+        all_results.extend(batch_results)
+        next_index += len(batch_results)
+
+    return pd.DataFrame(all_results, columns=POSTING_SHOPEE_RESULT_COLUMNS)
 
 def render_posting_shopee_result_preview(result_df):
     """Preview tetap enak dilihat, tapi dibatasi supaya bulk tidak jebol."""
@@ -8312,7 +8431,13 @@ def render_posting_shopee():
         st.error(str(error))
         st.code("requests\nbeautifulsoup4\nrapidfuzz")
         st.stop()
-    st.caption("Generate data posting bulk langsung dari AGRES.ID. Mode bulk tidak render preview per produk agar aman untuk 100–200+ SKU.")
+
+    posting_shopee_init_batch_state()
+
+    st.caption(
+        "Generate data posting bulk langsung dari AGRES.ID. "
+        "Total SKU boleh besar, proses dibuat per batch supaya lebih tahan timeout."
+    )
 
     st.write("Upload Excel dengan kolom:")
     st.code("KODEBARANG | SPESIFIKASI | HARGA | STOK")
@@ -8320,6 +8445,15 @@ def render_posting_shopee():
     uploaded = st.file_uploader("Upload Pricelist", type=["xlsx", "xls"], key="posting_shopee_upload_pricelist")
 
     if uploaded:
+        upload_signature = f"{getattr(uploaded, 'name', '')}:{getattr(uploaded, 'size', '')}"
+        if st.session_state.posting_shopee_upload_signature != upload_signature:
+            posting_shopee_reset_batch_state(upload_signature)
+
+        try:
+            uploaded.seek(0)
+        except Exception:
+            pass
+
         df = pd.read_excel(uploaded)
 
         required = ["KODEBARANG", "SPESIFIKASI", "HARGA", "STOK"]
@@ -8329,28 +8463,164 @@ def render_posting_shopee():
             st.error(f"Kolom tidak ditemukan: {missing}")
             st.stop()
 
-        st.info(f"Total SKU terbaca: {len(df)}")
+        total_sku = len(df)
+        if total_sku <= 0:
+            st.warning("File tidak memiliki baris SKU untuk diproses.")
+            st.stop()
 
-        if st.button("Mulai Generate Bulk", key="posting_shopee_generate_bulk"):
-            result_df = process_posting_shopee_bulk(df)
-            excel_file = create_posting_shopee_excel_download(result_df)
+        st.info(f"Total SKU terbaca: {total_sku}")
 
+        with st.expander("Pengaturan Batch", expanded=True):
+            st.number_input(
+                "SKU per batch (bukan total SKU)",
+                min_value=POSTING_SHOPEE_BATCH_MIN,
+                max_value=POSTING_SHOPEE_BATCH_MAX,
+                value=int(st.session_state.posting_shopee_batch_size),
+                step=10,
+                key="posting_shopee_batch_size",
+                disabled=bool(st.session_state.posting_shopee_running),
+                help="Total SKU boleh ribuan. Yang dibatasi adalah jumlah SKU yang diproses sekali jalan.",
+            )
+            st.checkbox(
+                "Lanjut batch otomatis",
+                value=bool(st.session_state.posting_shopee_auto_continue),
+                key="posting_shopee_auto_continue",
+            )
+            st.number_input(
+                "Jeda antar batch otomatis (detik)",
+                min_value=0.0,
+                max_value=10.0,
+                value=float(st.session_state.posting_shopee_batch_delay),
+                step=0.5,
+                key="posting_shopee_batch_delay",
+                help="Kasih napas sebentar ke AGRES.ID supaya tidak gampang kena limit.",
+            )
+            st.caption(
+                "Rekomendasi aman: 100 SKU per batch. Kalau stabil boleh 150–200. "
+                "Total 5000 SKU tetap bisa, prosesnya dicicil otomatis."
+            )
+
+        processed_count = min(int(st.session_state.posting_shopee_next_index or 0), total_sku)
+        batch_size = int(st.session_state.posting_shopee_batch_size or POSTING_SHOPEE_BATCH_DEFAULT)
+        next_start = processed_count + 1 if processed_count < total_sku else total_sku
+        next_end = min(processed_count + batch_size, total_sku)
+
+        st.progress(processed_count / max(total_sku, 1))
+        st.write(
+            f"Progress: {processed_count}/{total_sku} SKU "
+            f"({round(processed_count / max(total_sku, 1) * 100, 1)}%)"
+        )
+        if processed_count < total_sku:
+            st.caption(f"Batch berikutnya: SKU {next_start} sampai {next_end}.")
+
+        col_start, col_pause, col_resume, col_reset = st.columns(4)
+
+        with col_start:
+            if st.button(
+                "Mulai Generate Bulk",
+                key="posting_shopee_generate_bulk",
+                disabled=bool(st.session_state.posting_shopee_running),
+            ):
+                posting_shopee_reset_batch_state(upload_signature)
+                st.session_state.posting_shopee_running = True
+                st.session_state.posting_shopee_done = False
+                posting_shopee_safe_rerun()
+
+        with col_pause:
+            if st.button(
+                "Pause / Stop",
+                key="posting_shopee_pause_bulk",
+                disabled=not bool(st.session_state.posting_shopee_running),
+            ):
+                st.session_state.posting_shopee_running = False
+                st.session_state.posting_shopee_last_message = "Proses dipause. Klik Lanjutkan untuk meneruskan dari SKU terakhir."
+                posting_shopee_safe_rerun()
+
+        with col_resume:
+            can_resume = (
+                not bool(st.session_state.posting_shopee_running)
+                and not bool(st.session_state.posting_shopee_done)
+                and int(st.session_state.posting_shopee_next_index or 0) < total_sku
+                and bool(st.session_state.posting_shopee_results)
+            )
+            if st.button("Lanjutkan", key="posting_shopee_resume_bulk", disabled=not can_resume):
+                st.session_state.posting_shopee_running = True
+                st.session_state.posting_shopee_last_message = ""
+                posting_shopee_safe_rerun()
+
+        with col_reset:
+            if st.button(
+                "Reset Hasil",
+                key="posting_shopee_reset_bulk",
+                disabled=bool(st.session_state.posting_shopee_running),
+            ):
+                posting_shopee_reset_batch_state(upload_signature)
+                posting_shopee_safe_rerun()
+
+        if st.session_state.posting_shopee_last_message:
+            st.info(st.session_state.posting_shopee_last_message)
+
+        if st.session_state.posting_shopee_running:
+            start_index = min(int(st.session_state.posting_shopee_next_index or 0), total_sku)
+
+            if start_index >= total_sku:
+                st.session_state.posting_shopee_running = False
+                st.session_state.posting_shopee_done = True
+            else:
+                batch_size = int(st.session_state.posting_shopee_batch_size or POSTING_SHOPEE_BATCH_DEFAULT)
+                with st.spinner(f"Memproses batch SKU {start_index + 1} sampai {min(start_index + batch_size, total_sku)}..."):
+                    batch_results = process_posting_shopee_batch(
+                        df,
+                        start_index=start_index,
+                        batch_size=batch_size,
+                    )
+
+                if not batch_results:
+                    st.session_state.posting_shopee_running = False
+                    st.session_state.posting_shopee_last_message = "Batch tidak menghasilkan data. Proses dihentikan supaya tidak loop kosong."
+                else:
+                    st.session_state.posting_shopee_results.extend(batch_results)
+                    st.session_state.posting_shopee_next_index = start_index + len(batch_results)
+
+                    if st.session_state.posting_shopee_next_index >= total_sku:
+                        st.session_state.posting_shopee_running = False
+                        st.session_state.posting_shopee_done = True
+                        st.session_state.posting_shopee_last_message = "Selesai generate semua SKU."
+                    else:
+                        st.session_state.posting_shopee_last_message = (
+                            f"Batch selesai. Sudah proses {st.session_state.posting_shopee_next_index}/{total_sku} SKU."
+                        )
+                        if st.session_state.posting_shopee_auto_continue:
+                            time.sleep(float(st.session_state.posting_shopee_batch_delay or 0))
+                            posting_shopee_safe_rerun()
+
+        result_df = pd.DataFrame(st.session_state.posting_shopee_results, columns=POSTING_SHOPEE_RESULT_COLUMNS)
+
+        if not result_df.empty:
             found_count = int((result_df["STATUS"] == "FOUND").sum())
             not_found_count = int((result_df["STATUS"] == "NOT_FOUND").sum())
             error_count = int((result_df["STATUS"] == "ERROR").sum())
 
-            st.success("Selesai generate data.")
+            if st.session_state.posting_shopee_done:
+                st.success("Selesai generate data.")
+            elif not st.session_state.posting_shopee_running:
+                st.warning("Proses belum selesai. Bisa download hasil sementara atau klik Lanjutkan.")
+            else:
+                st.info("Proses sedang berjalan per batch.")
+
             st.write(f"FOUND: {found_count} | NOT_FOUND: {not_found_count} | ERROR: {error_count}")
 
-            render_posting_shopee_result_preview(result_df)
-
+            excel_file = create_posting_shopee_excel_download(result_df)
             st.download_button(
-                "Download Hasil Excel",
+                "Download Hasil Excel" if st.session_state.posting_shopee_done else "Download Hasil Excel Sementara",
                 data=excel_file,
-                file_name="hasil_posting_shopee.xlsx",
+                file_name="hasil_posting_shopee.xlsx" if st.session_state.posting_shopee_done else "hasil_posting_shopee_sementara.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="posting_shopee_download_hasil",
+                key=f"posting_shopee_download_hasil_{len(result_df)}_{int(st.session_state.posting_shopee_done)}",
             )
+
+            if not st.session_state.posting_shopee_running:
+                render_posting_shopee_result_preview(result_df)
 
 def render_posting_tiktokshop():
     st.title("Posting TikTokShop")
