@@ -8749,7 +8749,7 @@ def render_posting_shopee():
 
         st.info(f"Total SKU terbaca: {total_sku}")
 
-        with st.expander("Pengaturan Batch", expanded=True):
+        with st.expander("Pengaturan Batch", expanded=False):
             st.number_input(
                 "SKU per batch (bukan total SKU)",
                 min_value=POSTING_SHOPEE_BATCH_MIN,
@@ -8893,7 +8893,7 @@ def render_posting_shopee():
                 try:
                     template_rows = posting_count_shopee_template_rows(result_df)
                     template_file = create_posting_shopee_template_download(result_df, template_uploaded.getvalue())
-                    st.info(f"Template Shopee siap dibuat: {template_rows} baris upload. SKU laptop -LAP- otomatis menjadi 4 variasi.")
+                    st.info(f"Template Shopee siap dibuat: {template_rows} baris upload. SKU -LAP- menjadi 4 variasi, selain -LAP- menjadi 2 variasi.")
                     st.download_button(
                         "Download Template Shopee Siap Upload" if st.session_state.posting_shopee_done else "Download Template Shopee Sementara",
                         data=template_file,
@@ -8915,8 +8915,8 @@ def render_posting_shopee():
                 key=f"posting_shopee_download_hasil_{len(result_df)}_{int(st.session_state.posting_shopee_done)}",
             )
 
-            if not st.session_state.posting_shopee_running:
-                render_posting_shopee_result_preview(result_df)
+            # Preview Hasil AGRES.ID sengaja tidak dirender supaya UI tetap ringan
+            # dan tidak memunculkan error tinggi tabel di Streamlit Cloud.
 
 def render_posting_tiktokshop():
     st.title("Posting TikTokShop")
