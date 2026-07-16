@@ -7138,9 +7138,15 @@ def render_progres_on_v2():
                     return f"{value / 1_000_000:.0f} jt"
                 return f"{value:,.0f}"
             texts = [display_value(value) for value in values]
-            # Lapisan putih memberi halo sehingga angka tetap terbaca saat terkena garis grafik.
-            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="text", showlegend=False, hoverinfo="skip", textfont={"color": "#ffffff", "size": 16}))
-            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="lines+markers+text", name=name, textfont={"color": "#111827", "size": 11}, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
+            fig.add_trace(go.Scatter(x=x, y=values, mode="lines+markers", name=name, marker={"size": 7, "color": color}, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
+            for point_x, point_y, point_text in zip(x, values, texts):
+                if point_y is None:
+                    continue
+                fig.add_annotation(
+                    x=point_x, y=point_y, text=point_text, showarrow=False, yshift=15,
+                    bgcolor="rgba(255, 255, 255, 0.96)", bordercolor=color, borderwidth=1,
+                    borderpad=3, font={"color": "#111827", "size": 10},
+                )
         fig.update_layout(title=title, height=320, margin={"l": 16, "r": 16, "t": 66, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.18})
         fig.update_yaxes(tickformat=f".{percent_decimals}%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
         fig.update_xaxes(tickfont={"color": "#374151"})
