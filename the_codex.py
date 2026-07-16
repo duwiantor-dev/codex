@@ -7003,9 +7003,35 @@ def render_progres_on_v2():
             rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:last_header + 1]]
         return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
 
+    def has_future_actual_data(data):
+        if not data:
+            return False
+        current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == date.today().month]
+        if not current_indexes:
+            return False
+        current_index = current_indexes[-1]
+        future_indexes = [idx for idx in range(current_index + 1, len(data["x"])) if data["x"][idx].upper()[:3] in month_numbers]
+        derived_rows = {"VS OLP", "MTD", "KONV%"}
+        return any(
+            idx < len(values) and values[idx] is not None
+            for row_name, values in data["rows"].items()
+            if row_name not in derived_rows
+            for idx in future_indexes
+        )
+
+    def remove_estimate_columns(data):
+        for est_index in reversed([idx for idx, x in enumerate(data["x"]) if x.upper().startswith("EST")]):
+            data["x"].pop(est_index)
+            for values in data["rows"].values():
+                if est_index < len(values):
+                    values.pop(est_index)
+        return data
+
     def limit_to_current_month(data):
         """Jangan tampilkan data bulan masa depan walaupun template Excel sudah memuatnya."""
         if not data:
+            return data
+        if has_future_actual_data(data):
             return data
         current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == date.today().month]
         if not current_indexes:
@@ -7019,6 +7045,9 @@ def render_progres_on_v2():
     def add_estimate(data):
         if not data:
             return data
+        # Jika sudah ada data aktual setelah bulan kalender saat ini, laporan dianggap final/historis.
+        if has_future_actual_data(data):
+            return remove_estimate_columns(data)
         data = limit_to_current_month(data)
         current_month = date.today().month
         current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == current_month]
@@ -7031,12 +7060,7 @@ def render_progres_on_v2():
 
         # Nilai bulan final tidak memerlukan proyeksi. Hapus EST template bila ada.
         if int(today_days) >= days:
-            for est_index in reversed(existing_estimates):
-                data["x"].pop(est_index)
-                for values in data["rows"].values():
-                    if est_index < len(values):
-                        values.pop(est_index)
-            return data
+            return remove_estimate_columns(data)
 
         # Hanya bulan kalender saat ini yang diproyeksikan; EST lain dari template diabaikan.
         for est_index in reversed(existing_estimates):
