@@ -7098,12 +7098,36 @@ def render_progres_on_v2():
                 values[est_index] = values[current_index] / int(today_days) * days
         return data
 
+    def complete_all_qty_from_categories(all_qty, laptop, phone_tab):
+        """Isi bulan ALL QTY yang kosong dari Laptop + Pho+Tab tanpa mengganti angka aktual."""
+        if not all([all_qty, laptop, phone_tab]):
+            return all_qty
+        reference_x = laptop["x"] if len(laptop["x"]) >= len(phone_tab["x"]) else phone_tab["x"]
+        existing_x = all_qty["x"]
+        all_qty["x"] = reference_x.copy()
+        for row_name in ("03 OLP", "05 OLR"):
+            existing = dict(zip(existing_x, all_qty["rows"].get(row_name, [])))
+            laptop_values = dict(zip(laptop["x"], laptop["rows"].get(row_name, [])))
+            phone_values = dict(zip(phone_tab["x"], phone_tab["rows"].get(row_name, [])))
+            filled = []
+            for month in reference_x:
+                if existing.get(month) is not None:
+                    filled.append(existing[month])
+                    continue
+                parts = [value for value in (laptop_values.get(month), phone_values.get(month)) if value is not None]
+                filled.append(sum(parts) if parts else None)
+            all_qty["rows"][row_name] = filled
+        for row_name, values in all_qty["rows"].items():
+            if row_name not in {"03 OLP", "05 OLR"}:
+                all_qty["rows"][row_name] = values + [None] * max(0, len(reference_x) - len(values))
+        return all_qty
+
     def line_chart(title, x, series, percent, key, compact=False):
         fig = go.Figure()
         numeric_values = [value for _, values, _ in series for value in values if value is not None]
         low = min(0, min(numeric_values)) if numeric_values else 0
         high = max(numeric_values) if numeric_values else 1
-        padding = max((high - low) * 0.16, abs(high) * 0.08, 1)
+        padding = max((high - low) * 0.16, abs(high) * 0.08, 0.002 if percent else 1)
         for name, values, color in series:
             def display_value(value):
                 if value is None:
@@ -7133,7 +7157,10 @@ def render_progres_on_v2():
         fig.update_yaxes(title_text=right_label, tickformat=",.0f", secondary_y=True)
         st.plotly_chart(fig, width="stretch", key=key)
 
-    divisions = [add_estimate(read_section(name)) for name in ["ALL QTY", "LAPTOP", "PHO + TAB"]]
+    raw_divisions = [read_section(name) for name in ["ALL QTY", "LAPTOP", "PHO + TAB"]]
+    if all(raw_divisions):
+        complete_all_qty_from_categories(*raw_divisions)
+    divisions = [add_estimate(data) for data in raw_divisions]
     if not all(divisions):
         st.error("Blok ALL QTY, LAPTOP, dan PHO + TAB belum lengkap.")
         return
