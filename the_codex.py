@@ -7062,7 +7062,7 @@ def render_progres_on_v2():
     live = read_section("HOST LIVE")
     st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
 
-    st.subheader("1. 05 OLR sebagai persen dari 03 OLP")
+    st.subheader("1. 05 OLR berapa persen dari 03 OLP")
     cols = st.columns(3)
     for i, data in enumerate(divisions):
         target, actual = data["rows"].get("03 OLP", []), data["rows"].get("05 OLR", [])
