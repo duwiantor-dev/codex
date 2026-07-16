@@ -6941,6 +6941,136 @@ def render_progres_on():
         st.plotly_chart(fig, use_container_width=True, key=f"progres_on_chart_{index}")
 
 
+def render_progres_on_v2():
+    """Dashboard progres sesuai KPI laporan ON."""
+    import calendar
+    from datetime import date, datetime
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    st.title("Progres ON")
+    st.caption("Dashboard KPI dari laporan ON. EST = aktual bulan berjalan / hari berjalan x jumlah hari dalam bulan.")
+    uploaded = st.file_uploader("Upload file Progres ON (.xlsx)", type=["xlsx"], key="progres_on_upload_v2")
+    if not uploaded:
+        st.info("Pilih file Excel untuk melihat dashboard progres.")
+        return
+    try:
+        workbook = pd.ExcelFile(uploaded)
+        sheet_name = st.selectbox("Sheet", workbook.sheet_names, key="progres_on_sheet_v2")
+        raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+    except Exception as e:
+        st.error(f"File Excel tidak dapat dibaca: {e}")
+        return
+
+    detected_days = None
+    for _, row in raw.iterrows():
+        if s_clean(row.iloc[0]).upper() == "TGL":
+            detected_days = to_int_or_none(row.iloc[1])
+            break
+    today_days = st.number_input("Hari berjalan (today)", min_value=1, max_value=31, value=min(int(detected_days or date.today().day), 31), step=1, key="progres_on_days_v2")
+    month_numbers = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+
+    def num(value):
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return float(value)
+        value = parse_price_cell(value)
+        return float(value) if value is not None else None
+
+    def label(value):
+        return value.strftime("%d %b") if isinstance(value, (datetime, date)) else s_clean(value)
+
+    def read_section(name):
+        start = next((i for i in range(len(raw)) if s_clean(raw.iloc[i, 0]).upper() == name), None)
+        if start is None:
+            return None
+        header_row = start
+        headers = raw.iloc[header_row].tolist()
+        if not any(v not in (None, "") for v in headers[1:]):
+            header_row += 1
+            headers = raw.iloc[header_row].tolist()
+        rows = {}
+        for row_index in range(header_row + 1, len(raw)):
+            row_label = s_clean(raw.iloc[row_index, 0])
+            if not row_label:
+                break
+            rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:]]
+        return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
+
+    def add_estimate(data):
+        if not data:
+            return data
+        est_index = next((i for i, x in enumerate(data["x"]) if x.upper().startswith("EST")), None)
+        actual_indexes = [i for i, x in enumerate(data["x"]) if x.upper()[:3] in month_numbers]
+        if est_index is None or not actual_indexes:
+            return data
+        current_index = actual_indexes[-1]
+        month = month_numbers.get(data["x"][current_index].upper()[:3], date.today().month)
+        days = calendar.monthrange(date.today().year, month)[1]
+        for values in data["rows"].values():
+            if current_index < len(values) and est_index < len(values) and values[current_index] is not None:
+                values[est_index] = values[current_index] / int(today_days) * days
+        return data
+
+    def line_chart(title, x, series, percent, key):
+        fig = go.Figure()
+        for name, values, color in series:
+            fig.add_trace(go.Scatter(x=x, y=values, mode="lines+markers", name=name, line={"width": 3, "color": color}))
+        fig.update_layout(title=title, height=300, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
+        fig.update_yaxes(tickformat=".0%" if percent else ",.0f", rangemode="tozero")
+        st.plotly_chart(fig, width="stretch", key=key)
+
+    def dual_chart(title, x, left_label, left, right_label, right, key):
+        if not any(v is not None for v in left + right):
+            st.info(f"{title}: data belum tersedia di Excel.")
+            return
+        fig = make_subplots(specs=[[{"secondary_y": True}]])
+        fig.add_trace(go.Bar(x=x, y=left, name=left_label, marker_color="#2563eb"), secondary_y=False)
+        fig.add_trace(go.Scatter(x=x, y=right, name=right_label, mode="lines+markers", line={"width": 3, "color": "#f97316"}), secondary_y=True)
+        fig.update_layout(title=title, height=360, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
+        fig.update_yaxes(title_text=left_label, tickformat=",.0f", secondary_y=False)
+        fig.update_yaxes(title_text=right_label, tickformat=",.0f", secondary_y=True)
+        st.plotly_chart(fig, width="stretch", key=key)
+
+    divisions = [add_estimate(read_section(name)) for name in ["ALL QTY", "LAPTOP", "PHO + TAB"]]
+    if not all(divisions):
+        st.error("Blok ALL QTY, LAPTOP, dan PHO + TAB belum lengkap.")
+        return
+    website = add_estimate(read_section("WEBSITE"))
+    meta = add_estimate(read_section("META ADS"))
+    google = read_section("GOOGLE AD")
+    live = read_section("HOST LIVE")
+    st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
+
+    st.subheader("1. 05 OLR sebagai persen dari 03 OLP")
+    cols = st.columns(3)
+    for i, data in enumerate(divisions):
+        target, actual = data["rows"].get("03 OLP", []), data["rows"].get("05 OLR", [])
+        ratio = [a / t if a is not None and t not in (None, 0) else None for t, a in zip(target, actual)]
+        with cols[i]:
+            line_chart(data["name"], data["x"], [("05 OLR / 03 OLP", ratio, "#2563eb")], True, f"ratio_{i}")
+
+    st.subheader("2. MTD 05 OLR versus bulan sebelumnya")
+    cols = st.columns(3)
+    for i, data in enumerate(divisions):
+        actual = data["rows"].get("05 OLR", [])
+        mtd = [None] + [current / previous - 1 if current is not None and previous not in (None, 0) else None for previous, current in zip(actual, actual[1:])]
+        with cols[i]:
+            line_chart(data["name"], data["x"], [("MTD 05 OLR", mtd, "#16a34a")], True, f"mtd_{i}")
+
+    st.subheader("3. Website - QTY dan GMV")
+    if website:
+        dual_chart("Website", website["x"], "QTY", website["rows"].get("QTY", []), "GMV", website["rows"].get("GMV", []), "website")
+    st.subheader("4. Meta Ads - Klik dan Spending")
+    if meta:
+        dual_chart("Meta Ads", meta["x"], "Klik", meta["rows"].get("KLIK", []), "Spending", meta["rows"].get("SPEND", []), "meta")
+    st.subheader("5. Google Ads - Klik dan Spending")
+    if google:
+        dual_chart("Google Ads", google["x"], "Klik", google["rows"].get("KLIK", []), "Spending", google["rows"].get("SPEND", []), "google")
+    st.subheader("6. Host Live - QTY dan GMV per hari")
+    if live:
+        dual_chart("Host Live", live["x"], "QTY", live["rows"].get("QTY", []), "GMV", live["rows"].get("GMV", []), "live")
+
+
 def build_margin_df_for_affiliate(pl_bytes: bytes, harga_key: str = "M3") -> pd.DataFrame:
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
     target_sheets = [name for name in ["LAPTOP", "TELCO", "PC HOM ELE"] if name in wb.sheetnames]
@@ -11086,7 +11216,7 @@ def main():
     elif route == "analisa_produk_stok":
         render_analisa_produk()
     elif route == "progres_on":
-        render_progres_on()
+        render_progres_on_v2()
     elif route == "analisa_margin":
         render_analisa_margin()
     elif route in ("affiliate", "affiliate_tiktokshop"):
