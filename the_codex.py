@@ -7122,7 +7122,7 @@ def render_progres_on_v2():
                 all_qty["rows"][row_name] = values + [None] * max(0, len(reference_x) - len(values))
         return all_qty
 
-    def line_chart(title, x, series, percent, key, compact=False):
+    def line_chart(title, x, series, percent, key, compact=False, percent_decimals=0):
         fig = go.Figure()
         numeric_values = [value for _, values, _ in series for value in values if value is not None]
         low = min(0, min(numeric_values)) if numeric_values else 0
@@ -7133,14 +7133,14 @@ def render_progres_on_v2():
                 if value is None:
                     return ""
                 if percent:
-                    return f"{value:.2%}"
+                    return f"{value:.{percent_decimals}%}"
                 if compact and abs(value) >= 1_000_000:
                     return f"{value / 1_000_000:.0f} jt"
                 return f"{value:,.0f}"
             texts = [display_value(value) for value in values]
             fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="lines+markers+text", name=name, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
         fig.update_layout(title=title, height=320, margin={"l": 16, "r": 16, "t": 66, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.18})
-        fig.update_yaxes(tickformat=".2%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
+        fig.update_yaxes(tickformat=f".{percent_decimals}%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
         st.plotly_chart(fig, width="stretch", key=key)
 
     def dual_line_chart(title, x, left_label, left, right_label, right, key):
@@ -7218,7 +7218,7 @@ def render_progres_on_v2():
                     values = conversion_rate(data, "QTY" if data is website else "QTY ALL LAP") if row_name == "__CONVERSION__" else (data["rows"].get(row_name, []) if data else [])
                     if values and any(value is not None for value in values):
                         metric_name = "Konversi" if row_name == "__CONVERSION__" else row_name.title()
-                        line_chart(title, data["x"], [(metric_name, values, color)], percent, f"{section_key}_{title}", compact=compact)
+                        line_chart(title, data["x"], [(metric_name, values, color)], percent, f"{section_key}_{title}", compact=compact, percent_decimals=2 if row_name == "__CONVERSION__" else 0)
                     else:
                         st.info(f"{title}: data belum tersedia di Excel.")
 
