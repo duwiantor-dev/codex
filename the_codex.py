@@ -7138,6 +7138,8 @@ def render_progres_on_v2():
                     return f"{value / 1_000_000:.0f} jt"
                 return f"{value:,.0f}"
             texts = [display_value(value) for value in values]
+            # Lapisan putih memberi halo sehingga angka tetap terbaca saat terkena garis grafik.
+            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="text", showlegend=False, hoverinfo="skip", textfont={"color": "#ffffff", "size": 16}))
             fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="lines+markers+text", name=name, textfont={"color": "#111827", "size": 11}, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
         fig.update_layout(title=title, height=320, margin={"l": 16, "r": 16, "t": 66, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.18})
         fig.update_yaxes(tickformat=f".{percent_decimals}%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
@@ -7234,18 +7236,14 @@ def render_progres_on_v2():
 
     st.subheader("5. Meta Ads")
     indicator_cards([
-        ("Meta Ads - QTY", meta, "QTY ALL LAP", "#2563eb", False, False),
         ("Meta Ads - Spend", meta, "SPEND", "#f97316", False, False),
         ("Meta Ads - Klik", meta, "KLIK", "#16a34a", False, False),
-        ("Meta Ads - Konversi", meta, "__CONVERSION__", "#9333ea", True, False),
     ], "meta")
 
     st.subheader("6. Google Ads")
     indicator_cards([
-        ("Google Ads - QTY", google, "QTY ALL LAP", "#2563eb", False, False),
         ("Google Ads - Spend", google, "SPEND", "#f97316", False, False),
         ("Google Ads - Klik", google, "KLIK", "#16a34a", False, False),
-        ("Google Ads - Konversi", google, "__CONVERSION__", "#9333ea", True, False),
     ], "google")
 
     st.subheader("7. Host Live - QTY dan GMV per hari")
