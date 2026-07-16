@@ -7231,7 +7231,6 @@ def render_progres_on_v2():
         ("Website - QTY", website, "QTY", "#2563eb", False, False),
         ("Website - GMV", website, "GMV", "#f97316", False, True),
         ("Website - Klik", website, "KLIK", "#16a34a", False, False),
-        ("Website - Konversi", website, "__CONVERSION__", "#9333ea", True, False),
     ], "website")
 
     st.subheader("5. Meta Ads")
