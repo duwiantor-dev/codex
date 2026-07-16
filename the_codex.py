@@ -6977,7 +6977,12 @@ def render_progres_on_v2():
         return float(value) if value is not None else None
 
     def label(value):
+        if value is None or pd.isna(value):
+            return ""
         return value.strftime("%d %b") if isinstance(value, (datetime, date)) else s_clean(value)
+
+    def has_value(value):
+        return value is not None and not pd.isna(value) and s_clean(value) != ""
 
     def read_section(name):
         start = next((i for i in range(len(raw)) if s_clean(raw.iloc[i, 0]).upper() == name), None)
@@ -6985,13 +6990,13 @@ def render_progres_on_v2():
             return None
         header_row = start
         headers = raw.iloc[header_row].tolist()
-        if not any(v not in (None, "") for v in headers[1:]):
+        if not any(has_value(v) for v in headers[1:]):
             header_row += 1
             headers = raw.iloc[header_row].tolist()
         rows = {}
         for row_index in range(header_row + 1, len(raw)):
             row_label = s_clean(raw.iloc[row_index, 0])
-            if not row_label:
+            if not has_value(raw.iloc[row_index, 0]):
                 break
             rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:]]
         return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
@@ -7014,7 +7019,8 @@ def render_progres_on_v2():
     def line_chart(title, x, series, percent, key):
         fig = go.Figure()
         for name, values, color in series:
-            fig.add_trace(go.Scatter(x=x, y=values, mode="lines+markers", name=name, line={"width": 3, "color": color}))
+            texts = [(f"{value:.0%}" if percent else f"{value:,.0f}") if value is not None else "" for value in values]
+            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", mode="lines+markers+text", name=name, line={"width": 3, "color": color}))
         fig.update_layout(title=title, height=300, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
         fig.update_yaxes(tickformat=".0%" if percent else ",.0f", rangemode="tozero")
         st.plotly_chart(fig, width="stretch", key=key)
@@ -7024,8 +7030,10 @@ def render_progres_on_v2():
             st.info(f"{title}: data belum tersedia di Excel.")
             return
         fig = make_subplots(specs=[[{"secondary_y": True}]])
-        fig.add_trace(go.Bar(x=x, y=left, name=left_label, marker_color="#2563eb"), secondary_y=False)
-        fig.add_trace(go.Scatter(x=x, y=right, name=right_label, mode="lines+markers", line={"width": 3, "color": "#f97316"}), secondary_y=True)
+        left_text = [f"{value:,.0f}" if value is not None else "" for value in left]
+        right_text = [f"{value:,.0f}" if value is not None else "" for value in right]
+        fig.add_trace(go.Bar(x=x, y=left, text=left_text, textposition="outside", name=left_label, marker_color="#2563eb"), secondary_y=False)
+        fig.add_trace(go.Scatter(x=x, y=right, text=right_text, textposition="top center", name=right_label, mode="lines+markers+text", line={"width": 3, "color": "#f97316"}), secondary_y=True)
         fig.update_layout(title=title, height=360, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
         fig.update_yaxes(title_text=left_label, tickformat=",.0f", secondary_y=False)
         fig.update_yaxes(title_text=right_label, tickformat=",.0f", secondary_y=True)
@@ -7037,7 +7045,7 @@ def render_progres_on_v2():
         return
     website = add_estimate(read_section("WEBSITE"))
     meta = add_estimate(read_section("META ADS"))
-    google = read_section("GOOGLE AD")
+    google = read_section("GOOGLE ADS") or read_section("GOOGLE AD")
     live = read_section("HOST LIVE")
     st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
 
