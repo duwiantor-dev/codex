@@ -6855,6 +6855,91 @@ def render_analisa_produk():
         st.error(f"Gagal membuka fitur Analisa Produk: {e}")
 
 
+def render_progres_on():
+    """Upload laporan progres bulanan dan tampilkan proyeksi serta grafiknya."""
+    import calendar
+    from datetime import date
+    import plotly.graph_objects as go
+
+    st.title("Progres ON")
+    st.caption("Upload format progres seperti contoh. Kolom EST dihitung dari nilai bulan berjalan ÷ hari berjalan × jumlah hari dalam bulan.")
+    uploaded = st.file_uploader("Upload file Progres ON (.xlsx)", type=["xlsx"], key="progres_on_upload")
+    if not uploaded:
+        st.info("Pilih file Excel untuk melihat tabel dan grafik proyeksi.")
+        return
+    try:
+        workbook = pd.ExcelFile(uploaded)
+    except Exception as e:
+        st.error(f"File Excel tidak dapat dibaca: {e}")
+        return
+
+    sheet_name = st.selectbox("Sheet", workbook.sheet_names, key="progres_on_sheet")
+    raw = pd.read_excel(workbook, sheet_name=sheet_name, header=None)
+    if raw.empty or raw.shape[1] < 3:
+        st.error("Format file belum cukup untuk dianalisa.")
+        return
+
+    detected_days = None
+    for _, row in raw.iterrows():
+        if s_clean(row.iloc[0]).upper() == "TGL":
+            detected_days = to_int_or_none(row.iloc[1])
+            break
+    detected_days = detected_days or date.today().day
+    today_days = st.number_input("Hari berjalan (today)", min_value=1, max_value=31, value=min(int(detected_days), 31), step=1, key="progres_on_days", help="Nilai ini dipakai untuk menghitung proyeksi EST bulan berjalan.")
+
+    def cell_text(value) -> str:
+        return s_clean(value).upper()
+
+    def number_value(value):
+        if isinstance(value, (int, float)) and not pd.isna(value):
+            return float(value)
+        parsed = parse_price_cell(value)
+        return float(parsed) if parsed is not None else None
+
+    sections = []
+    for header_idx in range(1, len(raw)):
+        header = [cell_text(value) for value in raw.iloc[header_idx].tolist()]
+        if not any(value.startswith("EST") for value in header):
+            continue
+        month_positions = [idx for idx, value in enumerate(header) if value in {"JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"}]
+        if len(month_positions) < 2 or header_idx + 2 >= len(raw):
+            continue
+        category = s_clean(raw.iloc[header_idx - 1, 0]) or f"Blok {header_idx + 1}"
+        if category.upper() == "TGL":
+            category = "QTY ALL"
+        labels, series = [], []
+        for data_idx in range(header_idx + 1, min(header_idx + 5, len(raw))):
+            label = s_clean(raw.iloc[data_idx, 0])
+            if not label or cell_text(label) in {"ACH", "MTD"}:
+                continue
+            values = [number_value(raw.iloc[data_idx, col]) for col in month_positions]
+            if any(value is not None for value in values):
+                labels.append(label)
+                series.append(values)
+        if len(series) >= 2:
+            sections.append({"category": category, "months": [header[col].title() for col in month_positions], "labels": labels, "series": series})
+
+    if not sections:
+        st.error("Blok progres tidak ditemukan. Pastikan ada baris header bulan dan kolom seperti 'EST JUL'.")
+        return
+    st.success(f"{len(sections)} kategori progres terbaca. Proyeksi memakai {int(today_days)} hari berjalan.")
+    for index, section in enumerate(sections):
+        months = section["months"]
+        current_month = months[-1]
+        month_numbers = {"JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6, "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12}
+        days_in_month = calendar.monthrange(date.today().year, month_numbers.get(current_month.upper(), date.today().month))[1]
+        projected = [((values[-1] or 0) / int(today_days)) * days_in_month for values in section["series"]]
+        table = pd.DataFrame(section["series"], index=section["labels"], columns=months)
+        table[f"EST {current_month.upper()}"] = projected
+        st.subheader(section["category"])
+        st.dataframe(table.style.format("{:,.0f}"), use_container_width=True)
+        fig = go.Figure()
+        chart_months = months + [f"EST {current_month}"]
+        for label, values, estimate in zip(section["labels"], section["series"], projected):
+            fig.add_trace(go.Scatter(x=chart_months, y=values + [estimate], mode="lines+markers", name=label, line={"width": 3}))
+        fig.update_layout(title=f"{section['category']} — progres vs proyeksi {current_month}", height=360, margin={"l": 20, "r": 20, "t": 55, "b": 20}, yaxis_title="Nilai", legend_title="Metrik", hovermode="x unified")
+        st.plotly_chart(fig, use_container_width=True, key=f"progres_on_chart_{index}")
+
 
 def build_margin_df_for_affiliate(pl_bytes: bytes, harga_key: str = "M3") -> pd.DataFrame:
     wb = load_workbook(io.BytesIO(pl_bytes), data_only=True, read_only=False)
@@ -10913,13 +10998,15 @@ def build_menu() -> str:
     elif group == "Analisa":
         child = st.sidebar.radio(
             "Pilih Fitur Analisa",
-            ["Analisa Penjualan", "Analisa Produk"],
+            ["Analisa Penjualan", "Analisa Produk", "Progres ON"],
             key="sidebar_analisa_menu",
         )
         if child == "Analisa Penjualan":
             route = "analisa_penjualan"
-        else:
+        elif child == "Analisa Produk":
             route = "analisa_produk_stok"
+        else:
+            route = "progres_on"
 
     elif group == "Affiliate":
         child = st.sidebar.radio(
@@ -10998,6 +11085,8 @@ def main():
         render_analisa_penjualan()
     elif route == "analisa_produk_stok":
         render_analisa_produk()
+    elif route == "progres_on":
+        render_progres_on()
     elif route == "analisa_margin":
         render_analisa_margin()
     elif route in ("affiliate", "affiliate_tiktokshop"):
