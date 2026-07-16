@@ -6981,6 +6981,24 @@ def render_progres_on_v2():
             return ""
         return value.strftime("%d %b") if isinstance(value, (datetime, date)) else s_clean(value)
 
+    def add_year_to_decembers(labels):
+        """Bedakan Desember tahun lalu dan Desember tahun berjalan pada grafik."""
+        month_values = [month_numbers.get(item.upper()[:3]) for item in labels]
+        rollover_count = sum(
+            1 for previous, current in zip(month_values, month_values[1:])
+            if previous is not None and current is not None and current < previous
+        )
+        year = date.today().year - rollover_count
+        result = []
+        previous = None
+        for item, month in zip(labels, month_values):
+            if previous is not None and month is not None and month < previous:
+                year += 1
+            result.append(f"{item} {year}" if month == 12 else item)
+            if month is not None:
+                previous = month
+        return result
+
     def has_value(value):
         return value is not None and not pd.isna(value) and s_clean(value) != ""
 
@@ -7001,7 +7019,8 @@ def render_progres_on_v2():
             if not has_value(raw.iloc[row_index, 0]):
                 break
             rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:last_header + 1]]
-        return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
+        x_labels = add_year_to_decembers([label(v) for v in headers[1:]])
+        return {"name": name.title(), "x": x_labels, "rows": rows}
 
     def has_future_actual_data(data):
         if not data:
@@ -7090,14 +7109,14 @@ def render_progres_on_v2():
                 if value is None:
                     return ""
                 if percent:
-                    return f"{value:.0%}"
+                    return f"{value:.2%}"
                 if compact and abs(value) >= 1_000_000:
                     return f"{value / 1_000_000:.0f} jt"
                 return f"{value:,.0f}"
             texts = [display_value(value) for value in values]
             fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="lines+markers+text", name=name, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
         fig.update_layout(title=title, height=320, margin={"l": 16, "r": 16, "t": 66, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.18})
-        fig.update_yaxes(tickformat=".0%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
+        fig.update_yaxes(tickformat=".2%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
         st.plotly_chart(fig, width="stretch", key=key)
 
     def dual_line_chart(title, x, left_label, left, right_label, right, key):
