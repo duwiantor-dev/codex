@@ -7024,14 +7024,22 @@ def render_progres_on_v2():
                 values[est_index] = values[current_index] / int(today_days) * days
         return data
 
-    def line_chart(title, x, series, percent, key):
+    def line_chart(title, x, series, percent, key, compact=False):
         fig = go.Figure()
         numeric_values = [value for _, values, _ in series for value in values if value is not None]
         low = min(0, min(numeric_values)) if numeric_values else 0
         high = max(numeric_values) if numeric_values else 1
         padding = max((high - low) * 0.16, abs(high) * 0.08, 1)
         for name, values, color in series:
-            texts = [(f"{value:.0%}" if percent else f"{value:,.0f}") if value is not None else "" for value in values]
+            def display_value(value):
+                if value is None:
+                    return ""
+                if percent:
+                    return f"{value:.0%}"
+                if compact and abs(value) >= 1_000_000:
+                    return f"{value / 1_000_000:.0f} jt"
+                return f"{value:,.0f}"
+            texts = [display_value(value) for value in values]
             fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", cliponaxis=False, mode="lines+markers+text", name=name, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
         fig.update_layout(title=title, height=320, margin={"l": 16, "r": 16, "t": 66, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.18})
         fig.update_yaxes(tickformat=".0%" if percent else ",.0f", range=[low - padding * 0.25, high + padding], automargin=True)
@@ -7091,32 +7099,54 @@ def render_progres_on_v2():
         with cols[i]:
             line_chart(data["name"], data["x"], [("QTY 05 OLR", data["rows"].get("05 OLR", []), "#7c3aed")], False, f"mtd_qty_{i}")
 
+    def conversion_rate(data, qty_row):
+        if not data:
+            return []
+        qty = data["rows"].get(qty_row, [])
+        clicks = data["rows"].get("KLIK", [])
+        return [quantity / click if quantity is not None and click not in (None, 0) else None for quantity, click in zip(qty, clicks)]
+
     def indicator_cards(items, section_key):
         for start in range(0, len(items), 3):
             cols = st.columns(3)
             for col, item in zip(cols, items[start:start + 3]):
-                title, data, row_name, color = item
+                title, data, row_name, color, percent, compact = item
                 with col:
-                    values = data["rows"].get(row_name, []) if data else []
+                    values = conversion_rate(data, "QTY" if data is website else "QTY ALL LAP") if row_name == "__CONVERSION__" else (data["rows"].get(row_name, []) if data else [])
                     if values and any(value is not None for value in values):
-                        line_chart(title, data["x"], [(row_name.title(), values, color)], False, f"{section_key}_{title}")
+                        metric_name = "Konversi" if row_name == "__CONVERSION__" else row_name.title()
+                        line_chart(title, data["x"], [(metric_name, values, color)], percent, f"{section_key}_{title}", compact=compact)
                     else:
                         st.info(f"{title}: data belum tersedia di Excel.")
 
-    st.subheader("4. Website, Meta Ads, dan Google Ads")
+    st.subheader("4. Website")
     indicator_cards([
-        ("Website - QTY", website, "QTY", "#2563eb"),
-        ("Website - GMV", website, "GMV", "#f97316"),
-        ("Meta Ads - Klik", meta, "KLIK", "#16a34a"),
-        ("Meta Ads - Spending", meta, "SPEND", "#dc2626"),
-        ("Google Ads - Klik", google, "KLIK", "#0891b2"),
-        ("Google Ads - Spending", google, "SPEND", "#9333ea"),
-    ], "channel")
+        ("Website - QTY", website, "QTY", "#2563eb", False, False),
+        ("Website - GMV", website, "GMV", "#f97316", False, True),
+        ("Website - Klik", website, "KLIK", "#16a34a", False, False),
+        ("Website - Konversi", website, "__CONVERSION__", "#9333ea", True, False),
+    ], "website")
 
-    st.subheader("5. Host Live - QTY dan GMV per hari")
+    st.subheader("5. Meta Ads")
     indicator_cards([
-        ("Host Live - QTY", live, "QTY", "#2563eb"),
-        ("Host Live - GMV", live, "GMV", "#f97316"),
+        ("Meta Ads - QTY", meta, "QTY ALL LAP", "#2563eb", False, False),
+        ("Meta Ads - Spend", meta, "SPEND", "#f97316", False, False),
+        ("Meta Ads - Klik", meta, "KLIK", "#16a34a", False, False),
+        ("Meta Ads - Konversi", meta, "__CONVERSION__", "#9333ea", True, False),
+    ], "meta")
+
+    st.subheader("6. Google Ads")
+    indicator_cards([
+        ("Google Ads - QTY", google, "QTY ALL LAP", "#2563eb", False, False),
+        ("Google Ads - Spend", google, "SPEND", "#f97316", False, False),
+        ("Google Ads - Klik", google, "KLIK", "#16a34a", False, False),
+        ("Google Ads - Konversi", google, "__CONVERSION__", "#9333ea", True, False),
+    ], "google")
+
+    st.subheader("7. Host Live - QTY dan GMV per hari")
+    indicator_cards([
+        ("Host Live - QTY", live, "QTY", "#2563eb", False, False),
+        ("Host Live - GMV", live, "GMV", "#f97316", False, True),
     ], "live")
 
 
