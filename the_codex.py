@@ -7003,9 +7003,23 @@ def render_progres_on_v2():
             rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:last_header + 1]]
         return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
 
+    def limit_to_current_month(data):
+        """Jangan tampilkan data bulan masa depan walaupun template Excel sudah memuatnya."""
+        if not data:
+            return data
+        current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == date.today().month]
+        if not current_indexes:
+            return data
+        current_index = current_indexes[-1]
+        data["x"] = data["x"][:current_index + 1]
+        for key, values in data["rows"].items():
+            data["rows"][key] = values[:current_index + 1]
+        return data
+
     def add_estimate(data):
         if not data:
             return data
+        data = limit_to_current_month(data)
         current_month = date.today().month
         current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == current_month]
         if not current_indexes:
@@ -7082,8 +7096,8 @@ def render_progres_on_v2():
         return
     website = add_estimate(read_section("WEBSITE"))
     # Meta Ads (klik dan spending) ditampilkan sebagai data aktual, tanpa EST Juli.
-    meta = read_section("META ADS")
-    google = read_section("GOOGLE ADS") or read_section("GOOGLE AD")
+    meta = limit_to_current_month(read_section("META ADS"))
+    google = limit_to_current_month(read_section("GOOGLE ADS") or read_section("GOOGLE AD"))
     live = read_section("HOST LIVE")
     st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
 
