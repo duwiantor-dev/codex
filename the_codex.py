@@ -7056,7 +7056,8 @@ def render_progres_on_v2():
         st.error("Blok ALL QTY, LAPTOP, dan PHO + TAB belum lengkap.")
         return
     website = add_estimate(read_section("WEBSITE"))
-    meta = add_estimate(read_section("META ADS"))
+    # Meta Ads (klik dan spending) ditampilkan sebagai data aktual, tanpa EST Juli.
+    meta = read_section("META ADS")
     google = read_section("GOOGLE ADS") or read_section("GOOGLE AD")
     live = read_section("HOST LIVE")
     st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
