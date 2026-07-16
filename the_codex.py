@@ -6993,12 +6993,14 @@ def render_progres_on_v2():
         if not any(has_value(v) for v in headers[1:]):
             header_row += 1
             headers = raw.iloc[header_row].tolist()
+        last_header = max((idx for idx, value in enumerate(headers) if has_value(value)), default=0)
+        headers = headers[:last_header + 1]
         rows = {}
         for row_index in range(header_row + 1, len(raw)):
             row_label = s_clean(raw.iloc[row_index, 0])
             if not has_value(raw.iloc[row_index, 0]):
                 break
-            rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:]]
+            rows[row_label.upper()] = [num(value) for value in raw.iloc[row_index, 1:last_header + 1]]
         return {"name": name.title(), "x": [label(v) for v in headers[1:]], "rows": rows}
 
     def add_estimate(data):
@@ -7006,9 +7008,15 @@ def render_progres_on_v2():
             return data
         est_index = next((i for i, x in enumerate(data["x"]) if x.upper().startswith("EST")), None)
         actual_indexes = [i for i, x in enumerate(data["x"]) if x.upper()[:3] in month_numbers]
-        if est_index is None or not actual_indexes:
+        if not actual_indexes:
             return data
         current_index = actual_indexes[-1]
+        if est_index is None:
+            # File boleh berhenti di bulan berjalan (mis. Jul). EST dibuat otomatis.
+            data["x"].append(f"EST {data['x'][current_index].upper()}")
+            est_index = len(data["x"]) - 1
+            for values in data["rows"].values():
+                values.append(None)
         month = month_numbers.get(data["x"][current_index].upper()[:3], date.today().month)
         days = calendar.monthrange(date.today().year, month)[1]
         for values in data["rows"].values():
