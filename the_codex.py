@@ -7020,20 +7020,20 @@ def render_progres_on_v2():
         fig = go.Figure()
         for name, values, color in series:
             texts = [(f"{value:.0%}" if percent else f"{value:,.0f}") if value is not None else "" for value in values]
-            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", mode="lines+markers+text", name=name, line={"width": 3, "color": color}))
+            fig.add_trace(go.Scatter(x=x, y=values, text=texts, textposition="top center", mode="lines+markers+text", name=name, line={"width": 3, "color": color, "shape": "spline", "smoothing": 1.1}))
         fig.update_layout(title=title, height=300, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
         fig.update_yaxes(tickformat=".0%" if percent else ",.0f", rangemode="tozero")
         st.plotly_chart(fig, width="stretch", key=key)
 
-    def dual_chart(title, x, left_label, left, right_label, right, key):
+    def dual_line_chart(title, x, left_label, left, right_label, right, key):
         if not any(v is not None for v in left + right):
             st.info(f"{title}: data belum tersedia di Excel.")
             return
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         left_text = [f"{value:,.0f}" if value is not None else "" for value in left]
         right_text = [f"{value:,.0f}" if value is not None else "" for value in right]
-        fig.add_trace(go.Bar(x=x, y=left, text=left_text, textposition="outside", name=left_label, marker_color="#2563eb"), secondary_y=False)
-        fig.add_trace(go.Scatter(x=x, y=right, text=right_text, textposition="top center", name=right_label, mode="lines+markers+text", line={"width": 3, "color": "#f97316"}), secondary_y=True)
+        fig.add_trace(go.Scatter(x=x, y=left, text=left_text, textposition="top center", name=left_label, mode="lines+markers+text", line={"width": 3, "color": "#2563eb", "shape": "spline", "smoothing": 1.1}), secondary_y=False)
+        fig.add_trace(go.Scatter(x=x, y=right, text=right_text, textposition="top center", name=right_label, mode="lines+markers+text", line={"width": 3, "color": "#f97316", "shape": "spline", "smoothing": 1.1}), secondary_y=True)
         fig.update_layout(title=title, height=360, margin={"l": 16, "r": 16, "t": 48, "b": 16}, hovermode="x unified", legend={"orientation": "h", "y": 1.12})
         fig.update_yaxes(title_text=left_label, tickformat=",.0f", secondary_y=False)
         fig.update_yaxes(title_text=right_label, tickformat=",.0f", secondary_y=True)
@@ -7065,18 +7065,27 @@ def render_progres_on_v2():
         with cols[i]:
             line_chart(data["name"], data["x"], [("MTD 05 OLR", mtd, "#16a34a")], True, f"mtd_{i}")
 
-    st.subheader("3. Website - QTY dan GMV")
-    if website:
-        dual_chart("Website", website["x"], "QTY", website["rows"].get("QTY", []), "GMV", website["rows"].get("GMV", []), "website")
-    st.subheader("4. Meta Ads - Klik dan Spending")
-    if meta:
-        dual_chart("Meta Ads", meta["x"], "Klik", meta["rows"].get("KLIK", []), "Spending", meta["rows"].get("SPEND", []), "meta")
-    st.subheader("5. Google Ads - Klik dan Spending")
-    if google:
-        dual_chart("Google Ads", google["x"], "Klik", google["rows"].get("KLIK", []), "Spending", google["rows"].get("SPEND", []), "google")
-    st.subheader("6. Host Live - QTY dan GMV per hari")
+    st.subheader("3. MTD 05 OLR versus bulan sebelumnya - Jumlah QTY")
+    cols = st.columns(3)
+    for i, data in enumerate(divisions):
+        with cols[i]:
+            line_chart(data["name"], data["x"], [("QTY 05 OLR", data["rows"].get("05 OLR", []), "#7c3aed")], False, f"mtd_qty_{i}")
+
+    st.subheader("4. Channel Performance")
+    cols = st.columns(3)
+    with cols[0]:
+        if website:
+            dual_line_chart("Website - QTY dan GMV", website["x"], "QTY", website["rows"].get("QTY", []), "GMV", website["rows"].get("GMV", []), "website")
+    with cols[1]:
+        if meta:
+            dual_line_chart("Meta Ads - Klik dan Spending", meta["x"], "Klik", meta["rows"].get("KLIK", []), "Spending", meta["rows"].get("SPEND", []), "meta")
+    with cols[2]:
+        if google:
+            dual_line_chart("Google Ads - Klik dan Spending", google["x"], "Klik", google["rows"].get("KLIK", []), "Spending", google["rows"].get("SPEND", []), "google")
+
+    st.subheader("5. Host Live - QTY dan GMV per hari")
     if live:
-        dual_chart("Host Live", live["x"], "QTY", live["rows"].get("QTY", []), "GMV", live["rows"].get("GMV", []), "live")
+        dual_line_chart("Host Live", live["x"], "QTY", live["rows"].get("QTY", []), "GMV", live["rows"].get("GMV", []), "live")
 
 
 def build_margin_df_for_affiliate(pl_bytes: bytes, harga_key: str = "M3") -> pd.DataFrame:
