@@ -7065,7 +7065,14 @@ def render_progres_on_v2():
     cols = st.columns(3)
     for i, data in enumerate(divisions):
         actual = data["rows"].get("05 OLR", [])
-        mtd = [None] + [current / previous - 1 if current is not None and previous not in (None, 0) else None for previous, current in zip(actual, actual[1:])]
+        est_index = next((idx for idx, label in enumerate(data["x"]) if label.upper().startswith("EST")), None)
+        mtd = []
+        for idx, current in enumerate(actual):
+            # EST bulan berjalan harus dibandingkan dengan bulan sebelumnya (Juni),
+            # bukan dengan nilai aktual Juli yang masih berjalan.
+            previous_index = idx - 2 if est_index == idx else idx - 1
+            previous = actual[previous_index] if previous_index >= 0 else None
+            mtd.append(current / previous - 1 if current is not None and previous not in (None, 0) else None)
         with cols[i]:
             line_chart(data["name"], data["x"], [("MTD 05 OLR", mtd, "#16a34a")], True, f"mtd_{i}")
 
