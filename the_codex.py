@@ -7006,21 +7006,38 @@ def render_progres_on_v2():
     def add_estimate(data):
         if not data:
             return data
-        est_index = next((i for i, x in enumerate(data["x"]) if x.upper().startswith("EST")), None)
-        actual_indexes = [i for i, x in enumerate(data["x"]) if x.upper()[:3] in month_numbers]
-        if not actual_indexes:
+        current_month = date.today().month
+        current_indexes = [idx for idx, x in enumerate(data["x"]) if month_numbers.get(x.upper()[:3]) == current_month]
+        if not current_indexes:
             return data
-        current_index = actual_indexes[-1]
-        if est_index is None:
-            # File boleh berhenti di bulan berjalan (mis. Jul). EST dibuat otomatis.
-            data["x"].append(f"EST {data['x'][current_index].upper()}")
-            est_index = len(data["x"]) - 1
+        # Jika nama bulan muncul dua kali (mis. Dec tahun lalu dan Dec tahun ini), ambil yang terakhir.
+        current_index = current_indexes[-1]
+        days = calendar.monthrange(date.today().year, current_month)[1]
+        existing_estimates = [idx for idx, x in enumerate(data["x"]) if x.upper().startswith("EST")]
+
+        # Nilai bulan final tidak memerlukan proyeksi. Hapus EST template bila ada.
+        if int(today_days) >= days:
+            for est_index in reversed(existing_estimates):
+                data["x"].pop(est_index)
+                for values in data["rows"].values():
+                    if est_index < len(values):
+                        values.pop(est_index)
+            return data
+
+        # Hanya bulan kalender saat ini yang diproyeksikan; EST lain dari template diabaikan.
+        for est_index in reversed(existing_estimates):
+            data["x"].pop(est_index)
             for values in data["rows"].values():
-                values.append(None)
-        month = month_numbers.get(data["x"][current_index].upper()[:3], date.today().month)
-        days = calendar.monthrange(date.today().year, month)[1]
+                if est_index < len(values):
+                    values.pop(est_index)
+            if est_index < current_index:
+                current_index -= 1
+
+        est_index = current_index + 1
+        data["x"].insert(est_index, f"EST {data['x'][current_index].upper()}")
         for values in data["rows"].values():
-            if current_index < len(values) and est_index < len(values) and values[current_index] is not None:
+            values.insert(est_index, None)
+            if current_index < len(values) and values[current_index] is not None:
                 values[est_index] = values[current_index] / int(today_days) * days
         return data
 
@@ -7087,7 +7104,9 @@ def render_progres_on_v2():
         for idx, current in enumerate(actual):
             # EST bulan berjalan harus dibandingkan dengan bulan sebelumnya (Juni),
             # bukan dengan nilai aktual Juli yang masih berjalan.
-            previous_index = idx - 2 if est_index == idx else idx - 1
+            # Setelah EST disisipkan, bulan-bulan berikutnya tetap dibandingkan dengan
+            # nilai aktual bulan sebelumnya, bukan dengan nilai proyeksi.
+            previous_index = idx - 2 if est_index is not None and idx >= est_index else idx - 1
             previous = actual[previous_index] if previous_index >= 0 else None
             mtd.append(current / previous - 1 if current is not None and previous not in (None, 0) else None)
         with cols[i]:
