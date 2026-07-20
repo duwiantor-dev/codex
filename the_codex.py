@@ -7179,6 +7179,7 @@ def render_progres_on_v2():
     meta = limit_to_current_month(read_section("META ADS"))
     google = limit_to_current_month(read_section("GOOGLE ADS") or read_section("GOOGLE AD"))
     live = read_section("HOST LIVE")
+    lenovo = add_estimate(read_section("LAPTOP LENOVO"))
     st.success(f"Dashboard siap. Proyeksi memakai {int(today_days)} hari berjalan.")
 
     st.subheader("1. 05 OLR berapa persen dari 03 OLP")
@@ -7256,6 +7257,11 @@ def render_progres_on_v2():
         ("Host Live - QTY", live, "QTY", "#2563eb", False, False),
         ("Host Live - GMV", live, "GMV", "#f97316", False, True),
     ], "live")
+
+    st.subheader("8. Laptop Lenovo")
+    indicator_cards([
+        ("Laptop Lenovo - QTY", lenovo, "05 OLR", "#2563eb", False, False),
+    ], "lenovo")
 
 
 def build_margin_df_for_affiliate(pl_bytes: bytes, harga_key: str = "M3") -> pd.DataFrame:
