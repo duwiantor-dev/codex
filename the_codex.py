@@ -3143,6 +3143,16 @@ def render_analisa_penjualan_app():
         if not ok:
             raise ValueError(msg)
 
+        # Template penjualan dapat memakai header DIVISI, DIVISION, atau DIV.
+        # Disatukan ke satu kolom agar filter dashboard selalu konsisten.
+        if "DIVISI" not in df.columns:
+            for alias in ["DIVISION", "DIV", "DIVISI PENJUALAN"]:
+                if alias in df.columns:
+                    df = df.rename(columns={alias: "DIVISI"})
+                    break
+        if "DIVISI" not in df.columns:
+            df["DIVISI"] = "(Tidak tersedia)"
+
         df = drop_total_rows(df)
 
         keep_cols = [
@@ -3150,6 +3160,7 @@ def render_analisa_penjualan_app():
             "PRODUCT", "BRAND", "QTY", "JUMLAH",
             "SO NO",
             "COUNTRY",
+            "DIVISI",
             "SPESIFIKASI",
             "NAMA CUSTOMER",
             "OTO",
@@ -3168,7 +3179,7 @@ def render_analisa_penjualan_app():
         df["JUMLAH"] = pd.to_numeric(coerce_numeric_series(df["JUMLAH"]), errors="coerce").fillna(0.0)
 
         for c in [
-            "STATUS", "TRANSAKSI", "TEAM", "PRODUCT", "BRAND",
+            "STATUS", "TRANSAKSI", "TEAM", "PRODUCT", "BRAND", "DIVISI",
             "SO NO", "COUNTRY", "SPESIFIKASI", "NAMA CUSTOMER", "OTO"
         ]:
             df[c] = df[c].astype(str).str.strip()
@@ -3792,22 +3803,28 @@ def render_analisa_penjualan_app():
 
         with ctl3:
             with st.form("filter_form", clear_on_submit=False):
-                filter_col1, filter_col2, filter_col3 = st.columns(3, gap="medium")
+                filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4, gap="medium")
                 with filter_col1:
+                    divisi_sel = st.multiselect("DIVISI", options_for(df_all, "DIVISI"), default=[])
                     category_sel = st.multiselect("CATEGORY (COUNTRY)", options_for(df_all, "COUNTRY"), default=[])
-                    transaksi_sel = st.multiselect("TRANSAKSI", options_for(df_all, "TRANSAKSI"), default=[])
                 with filter_col2:
+                    transaksi_sel = st.multiselect("TRANSAKSI", options_for(df_all, "TRANSAKSI"), default=[])
                     team_sel = st.multiselect("TEAM", options_for(df_all, "TEAM"), default=[])
-                    product_sel = st.multiselect("PRODUCT", options_for(df_all, "PRODUCT"), default=[])
                 with filter_col3:
+                    product_sel = st.multiselect("PRODUCT", options_for(df_all, "PRODUCT"), default=[])
                     brand_sel = st.multiselect("BRAND", options_for(df_all, "BRAND"), default=[])
+                with filter_col4:
                     platform_sel = st.multiselect("PLATFORM (NAMA CUSTOMER)", options_for(df_all, "PLATFORM"), default=[])
                 apply_clicked = st.form_submit_button("Apply Filter", use_container_width=True)
 
+        filter_defaults = {"DIVISI": [], "COUNTRY": [], "TRANSAKSI": [], "TEAM": [], "PRODUCT": [], "BRAND": [], "PLATFORM": []}
         if "filters" not in st.session_state:
-            st.session_state["filters"] = {"COUNTRY": [], "TRANSAKSI": [], "TEAM": [], "PRODUCT": [], "BRAND": [], "PLATFORM": []}
+            st.session_state["filters"] = filter_defaults
+        else:
+            st.session_state["filters"] = {**filter_defaults, **st.session_state["filters"]}
         if apply_clicked:
             st.session_state["filters"] = {
+                "DIVISI": divisi_sel,
                 "COUNTRY": category_sel,
                 "TRANSAKSI": transaksi_sel,
                 "TEAM": team_sel,
@@ -3821,6 +3838,7 @@ def render_analisa_penjualan_app():
 
         def apply_all_filters(df: pd.DataFrame) -> pd.DataFrame:
             out = df
+            out = apply_multifilter(out, "DIVISI", flt["DIVISI"])
             out = apply_multifilter(out, "COUNTRY", flt["COUNTRY"])
             out = apply_multifilter(out, "TRANSAKSI", flt["TRANSAKSI"])
             out = apply_multifilter(out, "TEAM", flt["TEAM"])
