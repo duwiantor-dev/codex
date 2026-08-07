@@ -4242,7 +4242,7 @@ def render_analisa_penjualan_app():
         st.dataframe(
             style_growth_pct_df(analysis_df),
             use_container_width=True,
-            height=520,
+            height=1040,
         )
 
 
