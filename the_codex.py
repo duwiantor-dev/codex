@@ -1823,6 +1823,7 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
         return None, f"Harga {price_key} 0/kosong di Pricelist untuk SKU '{base_sku}'"
 
     has_aff = False
+    has_co = False
     addon_total = 0
     for addon in addons:
         code = normalize_addon_code(addon)
@@ -1830,28 +1831,31 @@ def compute_price_from_maps(sku_full: str, price_map: Dict[str, Dict[str, int]],
             continue
 
         # Special trigger addon:
-        # KODEBARANG+AFF = harga barang naik 1%, lalu discount_rp tetap dikurangkan.
-        # Nilai AFF di file Addon Mapping tidak dipakai sebagai nominal tambah.
+        # KODEBARANG+AFF = harga barang naik 1%.
+        # KODEBARANG+CO = harga barang naik 2%.
+        # Nilai AFF/CO di file Addon Mapping tidak dipakai sebagai nominal tambah.
         if code == "AFF":
             has_aff = True
+            continue
+        if code == "CO":
+            has_co = True
             continue
 
         if code not in addon_map:
             return None, f"Addon '{code}' tidak ada di file Addon Mapping"
         addon_total += int(addon_map.get(code, 0))
 
-    if has_aff:
-        # Integer rounding: base_price * 1.01, dibulatkan ke rupiah terdekat.
-        price_before_discount = (base_price_int * 101 + 50) // 100
-    else:
-        price_before_discount = base_price_int
+    uplift_pct = (1 if has_aff else 0) + (2 if has_co else 0)
+    # Integer rounding: AFF +1%, CO +2%; bila keduanya ada maka +3%.
+    price_before_discount = (base_price_int * (100 + uplift_pct) + 50) // 100
 
     final_price = int(price_before_discount) + addon_total - int(discount_rp)
     if final_price <= 0:
         return None, f"Harga hasil {price_key} <= 0 untuk SKU '{base_sku}'"
 
-    if has_aff:
-        return final_price, f"{price_key} + AFF 1% + addon lain - diskon"
+    if has_aff or has_co:
+        triggers = " + ".join(filter(None, ["AFF 1%" if has_aff else "", "CO 2%" if has_co else ""]))
+        return final_price, f"{price_key} + {triggers} + addon lain - diskon"
     return final_price, f"{price_key} + addon - diskon"
 
 
